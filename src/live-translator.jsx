@@ -12,18 +12,25 @@ import {
 } from "lucide-react";
 
 const DEFAULT_CONFIG = {
-  useBuiltIn: true, // true = يستخدم موديل Claude عن طريق سيرفرك (السيرفر شايل المفتاح)
+  useBuiltIn: true,
   baseUrl: "https://api.deepseek.com/chat/completions",
   apiKey: "",
   model: "deepseek-chat",
-  supportsVision: false, // معظم موديلات DeepSeek المتاحة حاليًا نصية بس، مش بتقرأ صور
+  supportsVision: false,
 };
 
-// دومين السيرفر البروكسي بتاعك. سيبها فاضية لو الفرونت والسيرفر على نفس الدومين.
-// لو هتنشرهم منفصلين (مثلاً فرونت static على دومين والسيرفر على دومين تاني) حط لينك السيرفر هنا.
-const API_BASE = "";
+const STORAGE_KEY = "live-translator-config";
 
-// يحدد لو النص المُلتقط سؤال، عشان نبحث عن إجابته أوتوماتيك
+function loadConfig() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return DEFAULT_CONFIG;
+    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+  } catch {
+    return DEFAULT_CONFIG;
+  }
+}
+
 function looksLikeQuestion(original, translatedArabic) {
   const src = (original || "").trim();
   const ar = (translatedArabic || "").trim();
@@ -34,11 +41,24 @@ function looksLikeQuestion(original, translatedArabic) {
   return starters.test(src);
 }
 
+function parseModelJson(rawText) {
+  const clean = (rawText || "").replace(/```json|```/g, "").trim();
+  try {
+    return JSON.parse(clean);
+  } catch {
+    const match = clean.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error("invalid json");
+    return JSON.parse(match[0]);
+  }
+}
+
 export default function LiveTranslator() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
   const intervalRef = useRef(null);
+  const busyRef = useRef(false);
+  const searchingRef = useRef(false);
 
   const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -56,9 +76,19 @@ export default function LiveTranslator() {
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [draftConfig, setDraftConfig] = useState(DEFAULT_CONFIG);
 
+  useEffect(() => {
+    const saved = loadConfig();
+    setConfig(saved);
+    setDraftConfig(saved);
+  }, []);
+
   const startCamera = useCallback(async () => {
     setError("");
     try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setError("المتصفح ده مش بيدعم الكاميرا. جرّب Chrome أو Safari وعلى HTTPS.");
+        return;
+      }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
       }
@@ -71,8 +101,8 @@ export default function LiveTranslator() {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
       }
-    } catch (e) {
-      setError("مقدرش أوصل للكاميرا. تأكد من إعطاء الإذن للمتصفح.");
+    } catch {
+      setError("مقدرش أوصل للكاميرا. فعّل الإذن، واستخدم HTTPS بعد الديبلوي (الكاميرا مش بتشتغل على HTTP).");
     }
   }, [facing]);
 
@@ -80,37 +110,26 @@ export default function LiveTranslator() {
     startCamera();
     return () => {
       if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
-      if (intervalRef.current) clearInterval(intervalRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [startCamera]);
 
-  useEffect(() => {
-    startCamera();
-  }, [facing, startCamera]);
-
-  // نداء الموديل المدمج (Claude) عن طريق سيرفرك أنت - هو اللي شايل المفتاح، مش المتصفح
   const callBuiltIn = useCallback(async ({ imageBase64, textPrompt }) => {
     const endpoint = imageBase64 ? "/api/vision" : "/api/anthropic-search";
-    const response = await fetch(`${API_BASE}${endpoint}`, {
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(
-        imageBase64
-          ? { imageBase64, prompt: textPrompt }
-          : { prompt: textPrompt }
+        imageBase64 ? { imageBase64, prompt: textPrompt } : { prompt: textPrompt }
       ),
     });
-    const data = await response.json();
+    const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data?.error || `server error ${response.status}`);
     return (data.text || "").trim();
   }, []);
 
-  // نداء موديل خارجي (مثلاً DeepSeek) عن طريق سيرفرك بروكسي - هو اللي بينادي الموفر
-  // النداء بيبقى سيرفر-لسيرفر فمفيش مشكلة CORS، والمفتاح بيتبعت مرة واحدة في الـ request ومبيتخزنش
   const callCustomModel = useCallback(
     async (textPrompt, imageBase64) => {
-      const response = await fetch(`${API_BASE}/api/custom-proxy`, {
+      const response = await fetch("/api/custom-proxy", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -121,69 +140,18 @@ export default function LiveTranslator() {
           ...(imageBase64 ? { imageBase64 } : {}),
         }),
       });
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data?.error || `server error ${response.status}`);
       return (data.text || "").trim();
     },
     [config]
   );
 
-  const captureAndTranslate = useCallback(async () => {
-    if (!videoRef.current || !canvasRef.current || busy) return;
-    const video = videoRef.current;
-    if (video.videoWidth === 0) return;
-
-    const canBuiltIn = config.useBuiltIn || config.supportsVision;
-    if (!canBuiltIn) {
-      setError("الموديل الحالي مش بيدعم قراءة الصور. فعّل \"الموديل المدمج\" من الإعدادات أو اختار موديل يدعم Vision.");
-      return;
-    }
-
-    const canvas = canvasRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
-    const base64 = dataUrl.split(",")[1];
-
-    setBusy(true);
-    setError("");
-    try {
-      const prompt =
-        'Look at this image. If it contains readable English or Russian text, respond ONLY with a JSON object: {"found": true, "original": "<the text you see>", "translation": "<Arabic translation>"}. If there is no readable English/Russian text, respond ONLY with {"found": false}. No markdown, no extra words.';
-
-      // الترجمة من الصورة: الموديل المدمج، أو الموديل المخصص لو المستخدم أكّد إنه بيدعم صور
-      const rawText = config.useBuiltIn
-        ? await callBuiltIn({ imageBase64: base64, textPrompt: prompt })
-        : await callCustomModel(prompt, base64);
-
-      const clean = rawText.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(clean);
-      if (parsed.found) {
-        setOriginal(parsed.original || "");
-        setTranslated(parsed.translation || "");
-        setSearchInfo("");
-        setSearchError("");
-        setAutoSearched(false);
-
-        // لو الكلام سؤال، ندور على إجابة أوتوماتيك من غير ما ينتظر ضغطة
-        if (looksLikeQuestion(parsed.original, parsed.translation)) {
-          runSearch(parsed.original);
-        }
-      }
-    } catch (e) {
-      setError("حصل خطأ في الترجمة، هنحاول تاني.");
-    } finally {
-      setBusy(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, config, callBuiltIn, callCustomModel]);
-
   const runSearch = useCallback(
     async (textToSearch) => {
       const q = textToSearch ?? original;
-      if (!q || searching) return;
+      if (!q || searchingRef.current) return;
+      searchingRef.current = true;
       setSearching(true);
       setAutoSearched(true);
       setSearchError("");
@@ -196,38 +164,98 @@ export default function LiveTranslator() {
           : await callCustomModel(prompt);
 
         if (textParts) {
-          setSearchInfo(textParts);
-          if (!config.useBuiltIn) {
-            setSearchInfo(
-              (t) => `${t}\n\n(ملاحظة: الموديل المخصص مش بيعمل بحث حي في الإنترنت، الإجابة دي من معرفة الموديل نفسه بس)`
-            );
-          }
+          setSearchInfo(
+            config.useBuiltIn
+              ? textParts
+              : `${textParts}\n\n(ملاحظة: الموديل المخصص مش بيعمل بحث حي في الإنترنت، الإجابة دي من معرفة الموديل نفسه بس)`
+          );
         } else {
           setSearchError("مقدرش ألاقي معلومات إضافية دلوقتي.");
         }
-      } catch (e) {
+      } catch {
         setSearchError(
           config.useBuiltIn
             ? "حصل خطأ أثناء البحث، جرب تاني."
             : "حصل خطأ في نداء الموديل المخصص عن طريق السيرفر - راجع الـ Base URL / API Key / اسم الموديل في الإعدادات."
         );
       } finally {
+        searchingRef.current = false;
         setSearching(false);
       }
     },
-    [original, searching, config, callBuiltIn, callCustomModel]
+    [original, config, callBuiltIn, callCustomModel]
   );
 
-  const toggleRunning = () => {
-    if (running) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-      setRunning(false);
-    } else {
-      setRunning(true);
-      captureAndTranslate();
-      intervalRef.current = setInterval(captureAndTranslate, interval_);
+  const captureAndTranslate = useCallback(async () => {
+    if (!videoRef.current || !canvasRef.current || busyRef.current) return;
+    const video = videoRef.current;
+    if (video.videoWidth === 0) return;
+
+    const canReadImage = config.useBuiltIn || config.supportsVision;
+    if (!canReadImage) {
+      setError('الموديل الحالي مش بيدعم قراءة الصور. فعّل "الموديل المدمج" من الإعدادات أو اختار موديل يدعم Vision.');
+      return;
     }
+
+    const canvas = canvasRef.current;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
+    const base64 = dataUrl.split(",")[1];
+
+    busyRef.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      const prompt =
+        'Look at this image. If it contains readable English or Russian text, respond ONLY with a JSON object: {"found": true, "original": "<the text you see>", "translation": "<Arabic translation>"}. If there is no readable English/Russian text, respond ONLY with {"found": false}. No markdown, no extra words.';
+
+      const rawText = config.useBuiltIn
+        ? await callBuiltIn({ imageBase64: base64, textPrompt: prompt })
+        : await callCustomModel(prompt, base64);
+
+      const parsed = parseModelJson(rawText);
+      if (parsed.found) {
+        setOriginal(parsed.original || "");
+        setTranslated(parsed.translation || "");
+        setSearchInfo("");
+        setSearchError("");
+        setAutoSearched(false);
+
+        if (looksLikeQuestion(parsed.original, parsed.translation)) {
+          runSearch(parsed.original);
+        }
+      }
+    } catch {
+      setError("حصل خطأ في الترجمة، هنحاول تاني.");
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }, [config, callBuiltIn, callCustomModel, runSearch]);
+
+  useEffect(() => {
+    if (!running) {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      return;
+    }
+    captureAndTranslate();
+    intervalRef.current = setInterval(captureAndTranslate, interval_);
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+  }, [running, interval_, captureAndTranslate]);
+
+  const toggleRunning = () => {
+    setRunning((r) => !r);
   };
 
   const flipCamera = () => {
@@ -241,6 +269,7 @@ export default function LiveTranslator() {
 
   const saveSettings = () => {
     setConfig(draftConfig);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(draftConfig));
     setShowSettings(false);
   };
 
@@ -265,6 +294,7 @@ export default function LiveTranslator() {
           ref={videoRef}
           playsInline
           muted
+          autoPlay
           className="w-full h-full object-cover"
           style={{ transform: facing === "user" ? "scaleX(-1)" : "none" }}
         />
@@ -285,7 +315,6 @@ export default function LiveTranslator() {
           <RotateCcw size={16} />
         </button>
 
-        {/* ترجمة لايف فوق الكاميرا نفسها، زي الكابشن */}
         {translated && (
           <div className="absolute bottom-3 left-3 right-3 bg-neutral-950/85 backdrop-blur rounded-xl px-4 py-3 space-y-1">
             <p className="text-lg leading-snug font-semibold text-amber-400">{translated}</p>
@@ -314,11 +343,7 @@ export default function LiveTranslator() {
               className="flex items-center gap-2 text-xs text-amber-500 hover:text-amber-400 disabled:opacity-50"
             >
               {searching ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
-              {searching
-                ? "بيدور على إجابة..."
-                : autoSearched
-                ? "دور تاني"
-                : "ابحث عن معلومات إضافية"}
+              {searching ? "بيدور على إجابة..." : autoSearched ? "دور تاني" : "ابحث عن معلومات إضافية"}
             </button>
 
             {searchInfo && (
@@ -329,9 +354,7 @@ export default function LiveTranslator() {
             {searchError && <p className="text-xs text-red-400">{searchError}</p>}
           </div>
         ) : (
-          <p className="text-sm text-neutral-500 text-center py-2">
-            وجّه الكاميرا على نص وابدأ الترجمة
-          </p>
+          <p className="text-sm text-neutral-500 text-center py-2">وجّه الكاميرا على نص وابدأ الترجمة</p>
         )}
 
         <div className="flex items-center gap-3 pt-1">
@@ -379,9 +402,7 @@ export default function LiveTranslator() {
               <input
                 type="checkbox"
                 checked={draftConfig.useBuiltIn}
-                onChange={(e) =>
-                  setDraftConfig((c) => ({ ...c, useBuiltIn: e.target.checked }))
-                }
+                onChange={(e) => setDraftConfig((c) => ({ ...c, useBuiltIn: e.target.checked }))}
               />
             </label>
 
@@ -390,11 +411,8 @@ export default function LiveTranslator() {
                 <div className="flex items-start gap-2 text-xs text-amber-500/90 bg-amber-950/30 border border-amber-900/50 rounded-lg p-2.5">
                   <Info size={14} className="shrink-0 mt-0.5" />
                   <span>
-                    المفتاح بيتبعت لسيرفرك أنت (/api/custom-proxy) وهو اللي بينادي الموفر، فمفيش
-                    مشكلة CORS ومفيش مفتاح ظاهر في كود الصفحة. بس لسه المفتاح بيتبعت من المتصفح
-                    لسيرفرك مع كل طلب، فاستخدم HTTPS دايمًا. وكمان معظم موديلات DeepSeek النصية مش
-                    بتقرأ صور فعليًا حتى لو فعّلت الـ checkbox، فتأكد إن الموديل اللي حاططه فعلاً
-                    Vision قبل ما تعتمد عليه في خطوة تصوير النص.
+                    المفتاح بيتبعت لسيرفرك (/api/custom-proxy) وهو اللي بينادي الموفر. استخدم HTTPS دايمًا.
+                    معظم موديلات DeepSeek النصية مش بتقرأ صور حتى لو فعّلت الـ checkbox.
                   </span>
                 </div>
 
@@ -452,7 +470,7 @@ export default function LiveTranslator() {
               حفظ
             </button>
             <p className="text-[11px] text-neutral-600 text-center">
-              الإعدادات دي بتتحفظ في الذاكرة بس، هتتمسح لو عملت رفريش للصفحة.
+              الإعدادات بتتحفظ في المتصفح، مش على السيرفر.
             </p>
           </div>
         </div>
