@@ -59,8 +59,14 @@ const EMPTY_DRAFT = {
 
 const MAX_ERROR_LOG = 40;
 
-const VISION_PROMPT =
-  'You are a camera OCR+translate agent. Read the single most prominent English or Russian text near the center (one sentence or one question only). Reply with ONLY valid JSON, no markdown: {"found":true,"original":"<exact text>","translation":"<Arabic>"}. If nothing readable: {"found":false}.';
+const VISION_PROMPT = `You are a careful OCR + Arabic translator for a live camera.
+Read ONLY the single most prominent English or Russian sentence/question near the image center.
+Return ONLY one line of valid complete JSON (no markdown, no extra text):
+{"found":true,"original":"<exact source text>","translation":"<short clear Arabic translation>"}
+Rules:
+- translation: short Modern Standard Arabic only (one brief line), no English/mixed fragments.
+- Close all quotes and braces.
+If nothing readable: {"found":false}`;
 
 function looksLikeQuestion(original, translatedArabic) {
   const src = (original || "").trim();
@@ -87,6 +93,59 @@ function normalizeCapture(parsed) {
   return [{ original, translation }];
 }
 
+function repairTruncatedJson(text) {
+  let s = (text || "").trim();
+  if (!s.startsWith("{")) return s;
+
+  let inString = false;
+  let escaped = false;
+  for (const ch of s) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inString) {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') inString = !inString;
+  }
+  if (inString) s += '"';
+
+  const opens = (s.match(/\{/g) || []).length;
+  const closes = (s.match(/\}/g) || []).length;
+  if (opens > closes) s += "}".repeat(opens - closes);
+  return s;
+}
+
+function extractCaptureFallback(text) {
+  const originalMatch = text.match(/"original"\s*:\s*"((?:\\.|[^"\\])*)"/);
+  if (!originalMatch) return null;
+
+  let translation = "";
+  const closedTrans = text.match(/"translation"\s*:\s*"((?:\\.|[^"\\])*)"/);
+  if (closedTrans) {
+    translation = closedTrans[1];
+  } else {
+    const openTrans = text.match(/"translation"\s*:\s*"([\s\S]*)$/);
+    if (openTrans) translation = openTrans[1].replace(/["}\s]+$/g, "").trim();
+  }
+
+  const unescape = (v) => {
+    try {
+      return JSON.parse(`"${v}"`);
+    } catch {
+      return v;
+    }
+  };
+
+  return {
+    found: true,
+    original: unescape(originalMatch[1]),
+    translation: unescape(translation),
+  };
+}
+
 function parseModelJson(rawText) {
   const clean = (rawText || "").replace(/```json|```/gi, "").replace(/```/g, "").trim();
   if (!clean) throw new Error("الموديل رجّع رد فاضي");
@@ -102,11 +161,18 @@ function parseModelJson(rawText) {
   let parsed = tryParse(clean);
   if (parsed) return parsed;
 
-  const match = clean.match(/\{[\s\S]*\}/);
+  const repaired = repairTruncatedJson(clean);
+  parsed = tryParse(repaired);
+  if (parsed) return parsed;
+
+  const match = repaired.match(/\{[\s\S]*\}/);
   if (match) {
-    parsed = tryParse(match[0]);
+    parsed = tryParse(match[0]) || tryParse(repairTruncatedJson(match[0]));
     if (parsed) return parsed;
   }
+
+  const fallback = extractCaptureFallback(clean);
+  if (fallback?.original) return fallback;
 
   const preview = clean.slice(0, 180).replace(/\s+/g, " ");
   throw new Error(`الموديل رجّع رد مش JSON. preview="${preview}"`);
@@ -354,8 +420,8 @@ export default function LiveTranslator() {
       try {
         const isQ = looksLikeQuestion(q, translationHint);
         const prompt = isQ
-          ? `The user pointed a camera at this question: "${q}". Answer in Arabic in 2-3 short sentences. Be concrete. Do not only translate.`
-          : `The user pointed a camera at this text: "${q}". Give a short useful explanation in Arabic (2-3 sentences). Do not only repeat the translation.`;
+          ? `Camera captured this question: "${q}". Reply in Arabic ONLY with a very short useful answer: maximum 1–2 short lines (or a few words if enough). No intro, no bullet points, no repetition of the question.`
+          : `Camera captured this text: "${q}". Reply in Arabic ONLY with a very short useful summary/context: maximum 1–2 short lines. No intro, no filler, do not only restate the translation.`;
 
         const { text } = await callSearch(prompt);
         if (text) setSearchInfo(text);

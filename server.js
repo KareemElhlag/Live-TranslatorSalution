@@ -275,8 +275,8 @@ function extractAnthropicText(data) {
     .trim();
 }
 
-async function callAnthropic({ apiKey, model, messages, tools }) {
-  const body = { model, max_tokens: 1000, messages };
+async function callAnthropic({ apiKey, model, messages, tools, maxTokens = 1200 }) {
+  const body = { model, max_tokens: maxTokens, messages };
   if (tools) body.tools = tools;
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -292,7 +292,7 @@ async function callAnthropic({ apiKey, model, messages, tools }) {
   return extractAnthropicText(data);
 }
 
-async function callGemini({ apiKey, model, prompt, imageBase64 }) {
+async function callGemini({ apiKey, model, prompt, imageBase64, maxTokens = 1200 }) {
   const modelId = model || "gemini-2.0-flash";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent?key=${encodeURIComponent(apiKey)}`;
   const parts = [{ text: prompt }];
@@ -302,7 +302,13 @@ async function callGemini({ apiKey, model, prompt, imageBase64 }) {
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ contents: [{ role: "user", parts }] }),
+    body: JSON.stringify({
+      contents: [{ role: "user", parts }],
+      generationConfig: {
+        temperature: 0.2,
+        maxOutputTokens: maxTokens,
+      },
+    }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error?.message || `Gemini error ${res.status}`);
@@ -312,7 +318,7 @@ async function callGemini({ apiKey, model, prompt, imageBase64 }) {
     .trim();
 }
 
-async function callOpenAICompatible({ baseUrl, apiKey, model, prompt, imageBase64 }) {
+async function callOpenAICompatible({ baseUrl, apiKey, model, prompt, imageBase64, maxTokens = 1200 }) {
   let parsed;
   try {
     parsed = new URL(baseUrl);
@@ -342,10 +348,17 @@ async function callOpenAICompatible({ baseUrl, apiKey, model, prompt, imageBase6
     headers["X-Title"] = "Live Translator";
   }
 
+  const body = {
+    model,
+    messages: [{ role: "user", content }],
+    temperature: 0.2,
+    max_tokens: maxTokens,
+  };
+
   const r = await fetch(parsed.toString(), {
     method: "POST",
     headers,
-    body: JSON.stringify({ model, messages: [{ role: "user", content }] }),
+    body: JSON.stringify(body),
   });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data?.error?.message || `model error ${r.status}`);
@@ -368,6 +381,7 @@ async function runModel({ imageBase64, prompt, requireVision = false, webSearch 
   if (!apiKey) throw new Error(missingKeyMessage(entry));
 
   const cfg = PROVIDER_CONFIG[entry.provider] || PROVIDER_CONFIG.openai;
+  const maxTokens = imageBase64 ? 800 : 700;
 
   if (cfg.call === "anthropic") {
     const messages = imageBase64
@@ -396,6 +410,7 @@ async function runModel({ imageBase64, prompt, requireVision = false, webSearch 
         model: entry.model || "claude-sonnet-4-6",
         messages,
         tools,
+        maxTokens,
       }),
       model: publicModel(entry),
     };
@@ -408,6 +423,7 @@ async function runModel({ imageBase64, prompt, requireVision = false, webSearch 
         model: entry.model || "gemini-2.0-flash",
         prompt,
         imageBase64,
+        maxTokens,
       }),
       model: publicModel(entry),
     };
@@ -420,6 +436,7 @@ async function runModel({ imageBase64, prompt, requireVision = false, webSearch 
       model: entry.model,
       prompt,
       imageBase64,
+      maxTokens,
     }),
     model: publicModel(entry),
   };
