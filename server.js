@@ -1,5 +1,10 @@
 import express from "express";
 import cors from "cors";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
@@ -34,7 +39,7 @@ function extractText(data) {
     .trim();
 }
 
-// خطوة 1: قراءة النص من الصورة + ترجمته - بيستخدم مفتاح Anthropic المخزن في السيرفر بس
+// خطوة 1: قراءة النص من الصورة + ترجمته
 app.post("/api/vision", async (req, res) => {
   try {
     if (!ANTHROPIC_KEY) {
@@ -63,7 +68,7 @@ app.post("/api/vision", async (req, res) => {
   }
 });
 
-// خطوة 2 (الموديل المدمج): بحث في الإنترنت عن سياق/إجابة - بيستخدم نفس مفتاح السيرفر
+// خطوة 2 (الموديل المدمج): بحث في الإنترنت
 app.post("/api/anthropic-search", async (req, res) => {
   try {
     if (!ANTHROPIC_KEY) {
@@ -83,8 +88,7 @@ app.post("/api/anthropic-search", async (req, res) => {
   }
 });
 
-// خطوة 2 (موديل مخصص زي DeepSeek): بروكسي عام - المفتاح جاي من الفرونت مع كل طلب ومش بيتخزن هنا
-// النداء بيحصل سيرفر-لسيرفر فبيحل مشكلة الـ CORS اللي كانت بتحصل لما الفرونت كان بينادي الموفر مباشرة
+// خطوة 2 (موديل مخصص زي DeepSeek): بروكسي عام
 app.post("/api/custom-proxy", async (req, res) => {
   try {
     const { baseUrl, apiKey, model, prompt, imageBase64 } = req.body;
@@ -111,8 +115,13 @@ app.post("/api/custom-proxy", async (req, res) => {
   }
 });
 
-// لو هتحط ملفات الفرونت المبنية (build) في مجلد public جنب السيرفر ده هيقدر يقدّمها كمان
-app.use(express.static("public"));
+// تقديم ملفات الفرونت إند من مجلد public
+app.use(express.static(path.join(__dirname, "public")));
+
+// حل مشكلة Cannot GET / بعرض ملف index.html الرئيسي
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`proxy server running on :${PORT}`));
