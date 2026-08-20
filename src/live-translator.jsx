@@ -14,6 +14,8 @@ import {
   Check,
   Copy,
   Bug,
+  RectangleHorizontal,
+  RectangleVertical,
 } from "lucide-react";
 
 const PROVIDER_DEFAULTS = {
@@ -60,9 +62,10 @@ const EMPTY_DRAFT = {
 const MAX_ERROR_LOG = 40;
 
 const VISION_PROMPT = `You are a careful OCR + Arabic translator for a live camera.
-Read ONLY the single most prominent English or Russian sentence/question near the image center.
+Read the single most prominent English or Russian question/text near the image center.
+If it is a multiple-choice question (اختر / choose / options like 1) 2) 3) or A) B) C)), include the question AND all visible options in "original".
 Return ONLY one line of valid complete JSON (no markdown, no extra text):
-{"found":true,"original":"<exact source text>","translation":"<short clear Arabic translation>"}
+{"found":true,"original":"<exact source text including options if any>","translation":"<short clear Arabic translation>"}
 Rules:
 - translation: short Modern Standard Arabic only (one brief line), no English/mixed fragments.
 - Close all quotes and braces.
@@ -76,6 +79,28 @@ function looksLikeQuestion(original, translatedArabic) {
   const starters =
     /^(what|why|how|where|when|who|which|is|are|do|does|did|can|could|will|would|что|как|почему|где|когда|кто|какой|можно ли)\b/i;
   return starters.test(src);
+}
+
+function looksLikeMultipleChoice(text) {
+  const t = (text || "").trim();
+  if (!t) return false;
+  if (/اختر|choose\b|multiple\s*choice|select\s*(one|the\s*correct)/i.test(t)) return true;
+  if (/(?:^|\n)\s*(?:[1-4]|[A-Da-d]|[أ-د])[)\]\-.:]\s+\S+/m.test(t)) return true;
+  if (/(?:^|\n)\s*(?:[1-4]|[A-Da-d])\s*[)\]\-.:]\s+\S+/m.test(t)) return true;
+  const optionHits = t.match(/(?:^|\s)(?:[1-4]|[A-Da-d]|[أ-د])[)\]\-.:]/g);
+  return Boolean(optionHits && optionHits.length >= 2);
+}
+
+function buildAnswerPrompt(q, translationHint) {
+  const isMcq = looksLikeMultipleChoice(q) || looksLikeMultipleChoice(translationHint);
+  if (isMcq) {
+    return `Camera captured this MULTIPLE-CHOICE question (اختر) with options:\n"${q}"\nReply in Arabic. FIRST give the correct option number or letter only (example: 2 or B or ج). Then optionally one very short Arabic half-line. Preferred format: "2 — ..." or just "2". Do not write a long explanation. Do not skip the option number/letter.`;
+  }
+  const isQ = looksLikeQuestion(q, translationHint);
+  if (isQ) {
+    return `Camera captured this question: "${q}". Reply in Arabic ONLY with a very short useful answer: maximum 1–2 short lines (or a few words if enough). No intro, no bullet points, no repetition of the question.`;
+  }
+  return `Camera captured this text: "${q}". Reply in Arabic ONLY with a very short useful summary/context: maximum 1–2 short lines. No intro, no filler, do not only restate the translation.`;
 }
 
 function normalizeCapture(parsed) {
@@ -212,6 +237,31 @@ function formatErrorTime(ts) {
   }
 }
 
+/** بصمة بكسل دقيقة لإطار مصغّر — تطابق 100% = نفس الصورة حرفيًا */
+function fingerprintVideoFrame(video, canvas) {
+  if (!video?.videoWidth || !canvas) return "";
+  const w = 160;
+  const h = 90;
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return "";
+  ctx.drawImage(video, 0, 0, w, h);
+  const { data } = ctx.getImageData(0, 0, w, h);
+  let hash = 2166136261 >>> 0;
+  for (let i = 0; i < data.length; i++) {
+    hash ^= data[i];
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function normalizeTextKey(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export default function LiveTranslator() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -221,13 +271,14 @@ export default function LiveTranslator() {
   const searchingRef = useRef(false);
   const lastCaptureKeyRef = useRef("");
   const lastSearchKeyRef = useRef("");
+  const lastImageHashRef = useRef("");
   const lastRequestAtRef = useRef(0);
-  const intervalMsRef = useRef(10000);
+  const intervalMsRef = useRef(20000);
 
   const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState(false);
   const [lines, setLines] = useState([]);
-  const [interval_, setInterval_] = useState(10000);
+  const [interval_, setInterval_] = useState(20000);
   const [facing, setFacing] = useState("environment");
   const [searching, setSearching] = useState(false);
   const [searchInfo, setSearchInfo] = useState("");
@@ -235,6 +286,7 @@ export default function LiveTranslator() {
   const [errorLog, setErrorLog] = useState([]);
   const [showErrors, setShowErrors] = useState(false);
   const [copyOk, setCopyOk] = useState("");
+  const [wideBox, setWideBox] = useState(false);
 
   const [showSettings, setShowSettings] = useState(false);
   const [models, setModels] = useState([]);
@@ -418,11 +470,7 @@ export default function LiveTranslator() {
       setSearchError("");
       setSearchInfo("");
       try {
-        const isQ = looksLikeQuestion(q, translationHint);
-        const prompt = isQ
-          ? `Camera captured this question: "${q}". Reply in Arabic ONLY with a very short useful answer: maximum 1–2 short lines (or a few words if enough). No intro, no bullet points, no repetition of the question.`
-          : `Camera captured this text: "${q}". Reply in Arabic ONLY with a very short useful summary/context: maximum 1–2 short lines. No intro, no filler, do not only restate the translation.`;
-
+        const prompt = buildAnswerPrompt(q, translationHint);
         const { text } = await callSearch(prompt);
         if (text) setSearchInfo(text);
         else {
@@ -459,6 +507,12 @@ export default function LiveTranslator() {
       return;
     }
 
+    // 1) تطابق صورة 100% مع آخر إطار اتعالج → متبعتش Vision خالص
+    const frameHash = fingerprintVideoFrame(video, canvasRef.current);
+    if (frameHash && frameHash === lastImageHashRef.current) {
+      return;
+    }
+
     const canvas = canvasRef.current;
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
@@ -472,11 +526,22 @@ export default function LiveTranslator() {
     setBusy(true);
     try {
       const captured = await runAgentVision(base64);
-      if (!captured.length) return;
+      if (!captured.length) {
+        // حتى لو مفيش نص، ثبّت بصمة الإطار عشان منعيدش على نفس الفاضي
+        if (frameHash) lastImageHashRef.current = frameHash;
+        return;
+      }
 
-      const captureKey = captured.map((l) => l.original).join("||");
-      if (captureKey === lastCaptureKeyRef.current) return;
+      const captureKey = normalizeTextKey(captured.map((l) => l.original).join("||"));
+
+      // 2) تطابق نص 100% مع اللي في الميموري → متحدثش UI ومتجبش إجابة تاني
+      if (captureKey && captureKey === lastCaptureKeyRef.current) {
+        if (frameHash) lastImageHashRef.current = frameHash;
+        return;
+      }
+
       lastCaptureKeyRef.current = captureKey;
+      if (frameHash) lastImageHashRef.current = frameHash;
 
       setLines(captured);
       setSearchInfo("");
@@ -514,7 +579,16 @@ export default function LiveTranslator() {
   const toggleRunning = () => setRunning((r) => !r);
 
   const flipCamera = () => {
+    lastImageHashRef.current = "";
     setFacing((f) => (f === "environment" ? "user" : "environment"));
+  };
+
+  const forceRecapture = () => {
+    lastImageHashRef.current = "";
+    lastCaptureKeyRef.current = "";
+    lastSearchKeyRef.current = "";
+    lastRequestAtRef.current = 0;
+    captureAndTranslate();
   };
 
   const openSettings = async () => {
@@ -665,6 +739,16 @@ export default function LiveTranslator() {
         <div className="flex items-center gap-3">
           <span className="text-xs text-neutral-500 hidden sm:inline">إنجليزي / روسي ← عربي</span>
           <button
+            onClick={() => setWideBox((w) => !w)}
+            className={`text-neutral-400 hover:text-amber-400 p-1 rounded-md ${
+              wideBox ? "bg-amber-600/20 text-amber-400" : ""
+            }`}
+            aria-label={wideBox ? "وضع الطول" : "وضع العرض"}
+            title={wideBox ? "كارت بالطول" : "كارت بالعرض"}
+          >
+            {wideBox ? <RectangleVertical size={16} /> : <RectangleHorizontal size={16} />}
+          </button>
+          <button
             onClick={() => setShowErrors(true)}
             className="relative text-neutral-400 hover:text-amber-400 flex items-center gap-1 text-xs"
             aria-label="سجل الأخطاء"
@@ -713,26 +797,40 @@ export default function LiveTranslator() {
         </button>
 
         {primaryLine && (
-          <div className="absolute inset-x-3 bottom-3 z-10 pointer-events-none">
-            <div className="bg-black/35 backdrop-blur-md rounded-2xl px-3.5 py-3 border border-white/15 space-y-1.5 max-w-xl mx-auto pointer-events-auto">
+          <div
+            className={`absolute z-10 pointer-events-none ${
+              wideBox ? "inset-x-2 bottom-2" : "inset-x-3 bottom-3"
+            }`}
+          >
+            <div
+              className={`backdrop-blur-sm rounded-2xl border border-white/10 pointer-events-auto drop-shadow-lg ${
+                wideBox
+                  ? "bg-black/18 px-3 py-2.5 w-full max-w-none flex flex-row flex-wrap gap-x-4 gap-y-2 items-start"
+                  : "bg-black/18 px-3.5 py-3 max-w-xl mx-auto space-y-1.5"
+              }`}
+            >
               {primaryLine.translation && (
-                <p className="text-base sm:text-lg leading-snug font-semibold text-amber-300 drop-shadow">
-                  {primaryLine.translation}
-                </p>
+                <div className={wideBox ? "min-w-[30%] flex-1" : undefined}>
+                  <p className="text-base sm:text-lg leading-snug font-semibold text-amber-300 drop-shadow">
+                    {primaryLine.translation}
+                  </p>
+                </div>
               )}
               {primaryLine.original && (
-                <p className="text-sm text-white/90 leading-relaxed drop-shadow" dir="ltr">
-                  {primaryLine.original}
-                </p>
+                <div className={wideBox ? "min-w-[30%] flex-1" : "border-t border-white/10 pt-1.5"}>
+                  <p className="text-sm text-white/90 leading-relaxed drop-shadow" dir="ltr">
+                    {primaryLine.original}
+                  </p>
+                </div>
               )}
-              <div className="pt-1 border-t border-white/10">
+              <div className={wideBox ? "min-w-[25%] flex-1" : "pt-1 border-t border-white/10"}>
                 {searching ? (
                   <p className="text-xs text-emerald-200/90 flex items-center gap-1">
                     <Loader2 size={11} className="animate-spin" />
                     جاري الإجابة تلقائيًا...
                   </p>
                 ) : searchInfo ? (
-                  <p className="text-sm text-emerald-100/95 leading-relaxed whitespace-pre-line">
+                  <p className="text-sm text-emerald-100/95 leading-relaxed whitespace-pre-line font-medium">
                     {searchInfo}
                   </p>
                 ) : searchError ? (
@@ -755,14 +853,24 @@ export default function LiveTranslator() {
         )}
 
         {primaryLine && (
-          <button
-            onClick={() => runSearch(primaryLine.original, primaryLine.translation, { force: true })}
-            disabled={searching}
-            className="flex items-center gap-2 text-xs text-amber-500 hover:text-amber-400 disabled:opacity-50"
-          >
-            {searching ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
-            حدّث الإجابة
-          </button>
+          <div className="flex items-center gap-3 flex-wrap">
+            <button
+              onClick={() => runSearch(primaryLine.original, primaryLine.translation, { force: true })}
+              disabled={searching}
+              className="flex items-center gap-2 text-xs text-amber-500 hover:text-amber-400 disabled:opacity-50"
+            >
+              {searching ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
+              حدّث الإجابة
+            </button>
+            <button
+              onClick={forceRecapture}
+              disabled={busy}
+              className="flex items-center gap-2 text-xs text-neutral-400 hover:text-neutral-200 disabled:opacity-50"
+            >
+              <Camera size={13} />
+              صوّر من جديد
+            </button>
+          </div>
         )}
 
         <div className="flex items-center gap-3 pt-1">
@@ -775,9 +883,9 @@ export default function LiveTranslator() {
           </button>
         </div>
 
-        <div className="flex items-center justify-center gap-2 text-xs text-neutral-500">
+        <div className="flex items-center justify-center gap-2 text-xs text-neutral-500 flex-wrap">
           <span>سرعة الالتقاط:</span>
-          {[5000, 10000, 15000].map((ms) => (
+          {[10000, 20000, 40000, 80000].map((ms) => (
             <button
               key={ms}
               onClick={() => setInterval_(ms)}
@@ -790,10 +898,8 @@ export default function LiveTranslator() {
           ))}
         </div>
         <p className="text-[11px] text-neutral-600 text-center">
-          قفل الطلبات = الالتقاط + 1ث · الموديل:{" "}
+          نفس الصورة/نفس النص 100% = مفيش طلب جديد · قفل = الالتقاط + 1ث ·{" "}
           {activeModel ? activeModel.name : "جارٍ التحميل..."}
-          {activeModel?.supportsVision ? " · Vision" : activeModel ? " · نص فقط" : ""}
-          {activeModel?.hasApiKey === false ? " · مفتاح ناقص" : ""}
         </p>
       </div>
 
