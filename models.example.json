@@ -3,10 +3,10 @@
   "models": [
     {
       "id": "or-gemini-flash",
-      "name": "OpenRouter · Gemini Flash",
+      "name": "OpenRouter · Gemini 3.6 Flash",
       "provider": "openrouter",
       "baseUrl": "https://openrouter.ai/api/v1/chat/completions",
-      "model": "google/gemini-2.0-flash-001",
+      "model": "google/gemini-3.6-flash",
       "supportsVision": true,
       "supportsWebSearch": false,
       "envKey": "OPENROUTER_API_KEY"

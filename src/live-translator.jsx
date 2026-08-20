@@ -19,9 +19,9 @@ import {
 const PROVIDER_DEFAULTS = {
   openrouter: {
     supportsVision: true,
-    model: "google/gemini-2.0-flash-001",
+    model: "google/gemini-3.6-flash",
     nameHint: "OpenRouter · موديل جديد",
-    modelPlaceholder: "google/gemini-2.0-flash-001 أو openai/gpt-4o-mini أو أي slug",
+    modelPlaceholder: "google/gemini-3.6-flash أو openai/gpt-4o-mini أو أي slug",
   },
   gemini: {
     supportsVision: true,

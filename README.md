@@ -22,7 +22,7 @@
   "id": "or-anything",
   "name": "OpenRouter · اختياري",
   "provider": "openrouter",
-  "model": "google/gemini-2.0-flash-001",
+  "model": "google/gemini-3.6-flash",
   "supportsVision": true,
   "envKey": "OPENROUTER_API_KEY"
 }
