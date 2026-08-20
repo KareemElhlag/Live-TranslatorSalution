@@ -2,6 +2,34 @@
 
 كاميرا حية تقرأ نص إنجليزي أو روسي وتترجمه للعربية عبر Claude. الفرونت والـ API بيتنشروا مع بعض كخدمة Node واحدة.
 
+- للسعر الأرخص مع مرونة عالية: شحن OpenRouter (~$5) + أي model id Vision
+- حط المفتاح من واجهة الإعدادات أو في `.env` / Environment Variables — بيتحفظ في `keys.json` (gitignored)
+- `models.json` مفيهوش مفاتيح وبيترفع عادي؛ من الواجهة بتضيف اسم الموديل بس
+- Gemini مباشر و Claude و ZenMux لسه متاحين بنفس النظام
+
+## المفاتيح والموديلات
+
+| ملف | بيترفع؟ | المحتوى |
+| --- | --- | --- |
+| `models.json` | نعم | اسم العرض + provider + model id + Vision |
+| `keys.json` | لا | المفاتيح اللي اتحفظت من الواجهة |
+| `.env` | لا | نفس المفاتيح للديبلوي (له أولوية أعلى) |
+
+مثال موديل OpenRouter في `models.json`:
+
+```json
+{
+  "id": "or-anything",
+  "name": "OpenRouter · اختياري",
+  "provider": "openrouter",
+  "model": "google/gemini-2.0-flash-001",
+  "supportsVision": true,
+  "envKey": "OPENROUTER_API_KEY"
+}
+```
+
+غيّر `model` لأي slug من OpenRouter بنفس المفتاح.
+
 ## التشغيل المحلي
 
 1. انسخ البيئة:
@@ -10,13 +38,9 @@
 cp .env.example .env
 ```
 
-2. حط مفتاح Anthropic في `.env`:
+أو حط المفاتيح من شاشة الإعدادات بعد التشغيل.
 
-```
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-3. ثبّت وشغّل:
+2. ثبّت وشغّل:
 
 ```bash
 npm install

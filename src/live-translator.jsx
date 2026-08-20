@@ -9,27 +9,51 @@ import {
   Settings,
   X,
   Info,
+  Plus,
+  Trash2,
+  Check,
 } from "lucide-react";
 
-const DEFAULT_CONFIG = {
-  useBuiltIn: true,
-  baseUrl: "https://api.deepseek.com/chat/completions",
-  apiKey: "",
-  model: "deepseek-chat",
-  supportsVision: false,
+const PROVIDER_DEFAULTS = {
+  openrouter: {
+    supportsVision: true,
+    model: "google/gemini-2.0-flash-001",
+    nameHint: "OpenRouter · موديل جديد",
+    modelPlaceholder: "google/gemini-2.0-flash-001 أو openai/gpt-4o-mini أو أي slug",
+  },
+  gemini: {
+    supportsVision: true,
+    model: "gemini-2.0-flash",
+    nameHint: "Gemini مباشر",
+    modelPlaceholder: "gemini-2.0-flash",
+  },
+  anthropic: {
+    supportsVision: true,
+    model: "claude-sonnet-4-6",
+    nameHint: "Claude",
+    modelPlaceholder: "claude-sonnet-4-6",
+  },
+  zenmux: {
+    supportsVision: false,
+    model: "z-ai/glm-5.3-free",
+    nameHint: "ZenMux",
+    modelPlaceholder: "z-ai/glm-5.3-free",
+  },
+  openai: {
+    supportsVision: true,
+    model: "gpt-4o-mini",
+    nameHint: "OpenAI مباشر",
+    modelPlaceholder: "gpt-4o-mini",
+  },
 };
 
-const STORAGE_KEY = "live-translator-config";
-
-function loadConfig() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEFAULT_CONFIG;
-    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
-  } catch {
-    return DEFAULT_CONFIG;
-  }
-}
+const EMPTY_DRAFT = {
+  id: "",
+  name: "OpenRouter · موديل جديد",
+  provider: "openrouter",
+  model: "",
+  supportsVision: true,
+};
 
 function looksLikeQuestion(original, translatedArabic) {
   const src = (original || "").trim();
@@ -73,14 +97,52 @@ export default function LiveTranslator() {
   const [autoSearched, setAutoSearched] = useState(false);
 
   const [showSettings, setShowSettings] = useState(false);
-  const [config, setConfig] = useState(DEFAULT_CONFIG);
-  const [draftConfig, setDraftConfig] = useState(DEFAULT_CONFIG);
+  const [models, setModels] = useState([]);
+  const [presets, setPresets] = useState([]);
+  const [keySlots, setKeySlots] = useState([]);
+  const [keyDrafts, setKeyDrafts] = useState({});
+  const [activeId, setActiveId] = useState("");
+  const [modelsLoading, setModelsLoading] = useState(true);
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [settingsError, setSettingsError] = useState("");
+  const [settingsOk, setSettingsOk] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(EMPTY_DRAFT);
+
+  const activeModel = models.find((m) => m.id === activeId) || models[0] || null;
+
+  const refreshModels = useCallback(async () => {
+    setModelsLoading(true);
+    setSettingsError("");
+    try {
+      const [modelsRes, presetsRes, keysRes] = await Promise.all([
+        fetch("/api/models"),
+        fetch("/api/models/presets"),
+        fetch("/api/keys"),
+      ]);
+      const data = await modelsRes.json();
+      if (!modelsRes.ok) throw new Error(data?.error || "فشل تحميل الموديلات");
+      setModels(data.models || []);
+      setActiveId(data.activeId || data.models?.[0]?.id || "");
+
+      if (presetsRes.ok) {
+        const presetData = await presetsRes.json();
+        setPresets(presetData.presets || []);
+      }
+      if (keysRes.ok) {
+        const keysData = await keysRes.json();
+        setKeySlots(keysData.keys || []);
+      }
+    } catch (e) {
+      setSettingsError(e.message);
+    } finally {
+      setModelsLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    const saved = loadConfig();
-    setConfig(saved);
-    setDraftConfig(saved);
-  }, []);
+    refreshModels();
+  }, [refreshModels]);
 
   const startCamera = useCallback(async () => {
     setError("");
@@ -113,39 +175,27 @@ export default function LiveTranslator() {
     };
   }, [startCamera]);
 
-  const callBuiltIn = useCallback(async ({ imageBase64, textPrompt }) => {
-    const endpoint = imageBase64 ? "/api/vision" : "/api/anthropic-search";
-    const response = await fetch(endpoint, {
+  const callVision = useCallback(async (imageBase64, prompt) => {
+    const response = await fetch("/api/vision", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(
-        imageBase64 ? { imageBase64, prompt: textPrompt } : { prompt: textPrompt }
-      ),
+      body: JSON.stringify({ imageBase64, prompt }),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data?.error || `server error ${response.status}`);
     return (data.text || "").trim();
   }, []);
 
-  const callCustomModel = useCallback(
-    async (textPrompt, imageBase64) => {
-      const response = await fetch("/api/custom-proxy", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          baseUrl: config.baseUrl,
-          apiKey: config.apiKey,
-          model: config.model,
-          prompt: textPrompt,
-          ...(imageBase64 ? { imageBase64 } : {}),
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data?.error || `server error ${response.status}`);
-      return (data.text || "").trim();
-    },
-    [config]
-  );
+  const callSearch = useCallback(async (prompt) => {
+    const response = await fetch("/api/anthropic-search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data?.error || `server error ${response.status}`);
+    return { text: (data.text || "").trim(), model: data.model };
+  }, []);
 
   const runSearch = useCallback(
     async (textToSearch) => {
@@ -159,31 +209,24 @@ export default function LiveTranslator() {
       try {
         const prompt = `Search the web for helpful context about this text that was captured from a camera: "${q}". It could be a product, a sign, a menu item, a place, a brand, or general information, or it could be a question someone is asking about what they're looking at. Give a short, useful explanation or answer in Arabic (3-5 sentences max), written for someone who just saw this in real life. Do not just repeat the translation, add real extra context.`;
 
-        const textParts = config.useBuiltIn
-          ? await callBuiltIn({ textPrompt: prompt })
-          : await callCustomModel(prompt);
-
-        if (textParts) {
-          setSearchInfo(
-            config.useBuiltIn
-              ? textParts
-              : `${textParts}\n\n(ملاحظة: الموديل المخصص مش بيعمل بحث حي في الإنترنت، الإجابة دي من معرفة الموديل نفسه بس)`
-          );
+        const { text, model } = await callSearch(prompt);
+        if (text) {
+          const note =
+            model && !model.supportsWebSearch
+              ? "\n\n(ملاحظة: الموديل الحالي مش بيعمل بحث حي، الإجابة من معرفة الموديل بس)"
+              : "";
+          setSearchInfo(`${text}${note}`);
         } else {
           setSearchError("مقدرش ألاقي معلومات إضافية دلوقتي.");
         }
-      } catch {
-        setSearchError(
-          config.useBuiltIn
-            ? "حصل خطأ أثناء البحث، جرب تاني."
-            : "حصل خطأ في نداء الموديل المخصص عن طريق السيرفر - راجع الـ Base URL / API Key / اسم الموديل في الإعدادات."
-        );
+      } catch (e) {
+        setSearchError(e.message || "حصل خطأ أثناء البحث، جرب تاني.");
       } finally {
         searchingRef.current = false;
         setSearching(false);
       }
     },
-    [original, config, callBuiltIn, callCustomModel]
+    [original, callSearch]
   );
 
   const captureAndTranslate = useCallback(async () => {
@@ -191,9 +234,11 @@ export default function LiveTranslator() {
     const video = videoRef.current;
     if (video.videoWidth === 0) return;
 
-    const canReadImage = config.useBuiltIn || config.supportsVision;
-    if (!canReadImage) {
-      setError('الموديل الحالي مش بيدعم قراءة الصور. فعّل "الموديل المدمج" من الإعدادات أو اختار موديل يدعم Vision.');
+    if (activeModel && !activeModel.supportsVision) {
+      setError(
+        `الموديل "${activeModel.name}" مش بيدعم قراءة الصور. من الإعدادات اختار موديل Vision (OpenRouter / Gemini).`
+      );
+      setRunning(false);
       return;
     }
 
@@ -212,10 +257,7 @@ export default function LiveTranslator() {
       const prompt =
         'Look at this image. If it contains readable English or Russian text, respond ONLY with a JSON object: {"found": true, "original": "<the text you see>", "translation": "<Arabic translation>"}. If there is no readable English/Russian text, respond ONLY with {"found": false}. No markdown, no extra words.';
 
-      const rawText = config.useBuiltIn
-        ? await callBuiltIn({ imageBase64: base64, textPrompt: prompt })
-        : await callCustomModel(prompt, base64);
-
+      const rawText = await callVision(base64, prompt);
       const parsed = parseModelJson(rawText);
       if (parsed.found) {
         setOriginal(parsed.original || "");
@@ -228,13 +270,13 @@ export default function LiveTranslator() {
           runSearch(parsed.original);
         }
       }
-    } catch {
-      setError("حصل خطأ في الترجمة، هنحاول تاني.");
+    } catch (e) {
+      setError(e.message || "حصل خطأ في الترجمة، هنحاول تاني.");
     } finally {
       busyRef.current = false;
       setBusy(false);
     }
-  }, [config, callBuiltIn, callCustomModel, runSearch]);
+  }, [activeModel, callVision, runSearch]);
 
   useEffect(() => {
     if (!running) {
@@ -254,24 +296,149 @@ export default function LiveTranslator() {
     };
   }, [running, interval_, captureAndTranslate]);
 
-  const toggleRunning = () => {
-    setRunning((r) => !r);
-  };
+  const toggleRunning = () => setRunning((r) => !r);
 
   const flipCamera = () => {
     setFacing((f) => (f === "environment" ? "user" : "environment"));
   };
 
-  const openSettings = () => {
-    setDraftConfig(config);
+  const openSettings = async () => {
     setShowSettings(true);
+    setEditing(false);
+    setDraft(EMPTY_DRAFT);
+    setSettingsError("");
+    setSettingsOk("");
+    setKeyDrafts({});
+    await refreshModels();
   };
 
-  const saveSettings = () => {
-    setConfig(draftConfig);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(draftConfig));
-    setShowSettings(false);
+  const saveKeys = async () => {
+    const payload = {};
+    for (const [envKey, value] of Object.entries(keyDrafts)) {
+      if (String(value || "").trim()) payload[envKey] = String(value).trim();
+    }
+    if (!Object.keys(payload).length) {
+      setSettingsError("اكتب مفتاح جديد في خانة واحدة على الأقل قبل الحفظ.");
+      return;
+    }
+    setSettingsBusy(true);
+    setSettingsError("");
+    setSettingsOk("");
+    try {
+      const res = await fetch("/api/keys", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "فشل حفظ المفاتيح");
+      setKeySlots(data.keys || []);
+      setKeyDrafts({});
+      setSettingsOk("المفاتيح اتحفظت في keys.json (مش بتترفع على Git).");
+      await refreshModels();
+    } catch (e) {
+      setSettingsError(e.message);
+    } finally {
+      setSettingsBusy(false);
+    }
   };
+
+  const selectModel = async (id) => {
+    setSettingsBusy(true);
+    setSettingsError("");
+    try {
+      const res = await fetch("/api/models/active", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "فشل تفعيل الموديل");
+      setActiveId(data.activeId);
+      setError("");
+    } catch (e) {
+      setSettingsError(e.message);
+    } finally {
+      setSettingsBusy(false);
+    }
+  };
+
+  const startEdit = (model) => {
+    setEditing(true);
+    setDraft({
+      id: model.id,
+      name: model.name,
+      provider: model.provider || "openrouter",
+      model: model.model || "",
+      supportsVision: Boolean(model.supportsVision),
+    });
+  };
+
+  const applyPreset = (preset) => {
+    setEditing(true);
+    setDraft({
+      id: models.some((m) => m.id === preset.id) ? preset.id : "",
+      name: preset.name,
+      provider: preset.provider,
+      model: preset.model,
+      supportsVision: Boolean(preset.supportsVision),
+    });
+  };
+
+  const startCreate = () => {
+    setEditing(true);
+    setDraft({ ...EMPTY_DRAFT });
+  };
+
+  const saveModel = async () => {
+    setSettingsBusy(true);
+    setSettingsError("");
+    setSettingsOk("");
+    try {
+      const payload = {
+        ...(draft.id ? { id: draft.id } : {}),
+        name: draft.name.trim() || draft.model.trim(),
+        provider: draft.provider,
+        model: draft.model.trim(),
+        supportsVision: draft.supportsVision,
+      };
+
+      const res = await fetch("/api/models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "فشل حفظ الموديل");
+      await refreshModels();
+      setEditing(false);
+      setDraft(EMPTY_DRAFT);
+      setSettingsOk("الموديل اتحفظ في models.json (من غير مفاتيح).");
+    } catch (e) {
+      setSettingsError(e.message);
+    } finally {
+      setSettingsBusy(false);
+    }
+  };
+
+  const deleteModel = async (id) => {
+    if (!confirm("تمسح الموديل ده من models.json؟")) return;
+    setSettingsBusy(true);
+    setSettingsError("");
+    try {
+      const res = await fetch(`/api/models/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "فشل المسح");
+      setModels(data.models || []);
+      setActiveId(data.activeId || "");
+    } catch (e) {
+      setSettingsError(e.message);
+    } finally {
+      setSettingsBusy(false);
+    }
+  };
+
+  const providerMeta = PROVIDER_DEFAULTS[draft.provider] || PROVIDER_DEFAULTS.openrouter;
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col" dir="rtl">
@@ -383,95 +550,233 @@ export default function LiveTranslator() {
         </div>
 
         <p className="text-[11px] text-neutral-600 text-center">
-          الموديل الحالي: {config.useBuiltIn ? "المدمج (Claude)" : `مخصص — ${config.model || "بدون اسم"}`}
+          الموديل: {activeModel ? activeModel.name : "جارٍ التحميل..."}
+          {activeModel?.supportsVision ? " · Vision" : activeModel ? " · نص فقط" : ""}
+          {activeModel?.hasApiKey === false ? " · مفتاح ناقص" : ""}
         </p>
       </div>
 
       {showSettings && (
         <div className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-3">
-          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl w-full max-w-md p-4 space-y-4">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl w-full max-w-md p-4 space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold">إعدادات الموديل</h2>
+              <h2 className="text-sm font-semibold">الإعدادات</h2>
               <button onClick={() => setShowSettings(false)} aria-label="إغلاق">
                 <X size={18} />
               </button>
             </div>
 
-            <label className="flex items-center justify-between gap-3 bg-neutral-800/60 rounded-lg px-3 py-2.5">
-              <span className="text-sm">استخدام الموديل المدمج (المفتاح في السيرفر)</span>
-              <input
-                type="checkbox"
-                checked={draftConfig.useBuiltIn}
-                onChange={(e) => setDraftConfig((c) => ({ ...c, useBuiltIn: e.target.checked }))}
-              />
-            </label>
+            <div className="flex items-start gap-2 text-xs text-neutral-400 bg-neutral-800/50 rounded-lg p-2.5">
+              <Info size={14} className="shrink-0 mt-0.5" />
+              <span>
+                حط مفتاح <b>OpenRouter</b> مرة واحدة تحت، وبعدين ضيف أي model id من عندهم (Google أو
+                OpenAI أو غيرهم). المفاتيح في <span dir="ltr">keys.json</span>، والموديلات في{" "}
+                <span dir="ltr">models.json</span> من غير أسرار.
+              </span>
+            </div>
 
-            {!draftConfig.useBuiltIn && (
-              <div className="space-y-3">
-                <div className="flex items-start gap-2 text-xs text-amber-500/90 bg-amber-950/30 border border-amber-900/50 rounded-lg p-2.5">
-                  <Info size={14} className="shrink-0 mt-0.5" />
-                  <span>
-                    المفتاح بيتبعت لسيرفرك (/api/custom-proxy) وهو اللي بينادي الموفر. استخدم HTTPS دايمًا.
-                    معظم موديلات DeepSeek النصية مش بتقرأ صور حتى لو فعّلت الـ checkbox.
-                  </span>
-                </div>
+            {settingsError && <p className="text-xs text-red-400">{settingsError}</p>}
+            {settingsOk && <p className="text-xs text-emerald-400">{settingsOk}</p>}
 
-                <div className="space-y-1">
-                  <label className="text-xs text-neutral-400">Base URL</label>
-                  <input
-                    type="text"
-                    value={draftConfig.baseUrl}
-                    onChange={(e) => setDraftConfig((c) => ({ ...c, baseUrl: e.target.value }))}
-                    dir="ltr"
-                    className="w-full bg-neutral-800 rounded-lg px-3 py-2 text-sm outline-none"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-xs text-neutral-400">API Key</label>
+            <div className="space-y-3 border border-neutral-800 rounded-xl p-3">
+              <p className="text-xs font-medium text-neutral-300">المفاتيح (مرة واحدة)</p>
+              {keySlots.map((slot) => (
+                <div key={slot.envKey} className="space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-xs text-neutral-400">{slot.label}</label>
+                    <span className="text-[10px] text-neutral-500" dir="ltr">
+                      {slot.set ? `${slot.masked} · ${slot.source}` : "ناقص"}
+                    </span>
+                  </div>
                   <input
                     type="password"
-                    value={draftConfig.apiKey}
-                    onChange={(e) => setDraftConfig((c) => ({ ...c, apiKey: e.target.value }))}
+                    value={keyDrafts[slot.envKey] || ""}
+                    onChange={(e) =>
+                      setKeyDrafts((d) => ({ ...d, [slot.envKey]: e.target.value }))
+                    }
                     dir="ltr"
                     className="w-full bg-neutral-800 rounded-lg px-3 py-2 text-sm outline-none"
-                    placeholder="sk-..."
+                    placeholder={slot.set ? "سيب فاضي أو الصق مفتاح جديد" : slot.envKey}
+                  />
+                  <p className="text-[10px] text-neutral-600">{slot.hint}</p>
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={saveKeys}
+                disabled={settingsBusy}
+                className="w-full bg-neutral-100 text-neutral-900 font-medium py-2 rounded-xl text-sm disabled:opacity-50"
+              >
+                حفظ المفاتيح
+              </button>
+            </div>
+
+            {!editing && presets.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs text-neutral-500">إضافة سريعة</p>
+                <div className="flex flex-wrap gap-2">
+                  {presets.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => applyPreset(p)}
+                      className="text-[11px] px-2.5 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700"
+                      title={p.note}
+                    >
+                      {p.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {modelsLoading ? (
+              <div className="flex justify-center py-6">
+                <Loader2 className="animate-spin text-neutral-500" size={20} />
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {models.map((m) => {
+                  const isActive = m.id === activeId;
+                  return (
+                    <div
+                      key={m.id}
+                      className={`rounded-xl border px-3 py-2.5 ${
+                        isActive ? "border-amber-600 bg-amber-950/20" : "border-neutral-800 bg-neutral-800/40"
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() => selectModel(m.id)}
+                          disabled={settingsBusy}
+                          className="text-right flex-1"
+                        >
+                          <div className="flex items-center gap-2 text-sm font-medium">
+                            {isActive && <Check size={14} className="text-amber-500" />}
+                            {m.name}
+                          </div>
+                          <p className="text-[11px] text-neutral-500 mt-0.5" dir="ltr">
+                            {m.provider} · {m.model} · {m.supportsVision ? "Vision" : "text"} ·{" "}
+                            {m.hasApiKey ? "key ok" : "key missing"}
+                          </p>
+                        </button>
+                        <div className="flex gap-1">
+                          <button
+                            type="button"
+                            onClick={() => startEdit(m)}
+                            className="text-[11px] text-neutral-400 hover:text-neutral-200 px-2 py-1"
+                          >
+                            تعديل
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => deleteModel(m.id)}
+                            className="text-neutral-500 hover:text-red-400 p-1"
+                            aria-label="مسح"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {!editing ? (
+              <button
+                type="button"
+                onClick={startCreate}
+                className="w-full flex items-center justify-center gap-2 border border-dashed border-neutral-700 text-neutral-300 py-2.5 rounded-xl text-sm hover:border-neutral-500"
+              >
+                <Plus size={16} />
+                إضافة موديل (اسم الـ model بس)
+              </button>
+            ) : (
+              <div className="space-y-3 border-t border-neutral-800 pt-3">
+                <p className="text-xs text-neutral-400">{draft.id ? "تعديل موديل" : "موديل جديد"}</p>
+
+                <div className="space-y-1">
+                  <label className="text-xs text-neutral-400">الموفر</label>
+                  <select
+                    value={draft.provider}
+                    onChange={(e) => {
+                      const provider = e.target.value;
+                      const defaults = PROVIDER_DEFAULTS[provider] || PROVIDER_DEFAULTS.openrouter;
+                      setDraft((d) => ({
+                        ...d,
+                        provider,
+                        supportsVision: defaults.supportsVision,
+                        model: d.model || defaults.model,
+                        name: d.name || defaults.nameHint,
+                      }));
+                    }}
+                    className="w-full bg-neutral-800 rounded-lg px-3 py-2 text-sm outline-none"
+                  >
+                    <option value="openrouter">OpenRouter (أي موديل بنفس المفتاح)</option>
+                    <option value="gemini">Google Gemini مباشر</option>
+                    <option value="openai">OpenAI مباشر</option>
+                    <option value="zenmux">ZenMux</option>
+                    <option value="anthropic">Anthropic Claude</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs text-neutral-400">اسم للعرض</label>
+                  <input
+                    type="text"
+                    value={draft.name}
+                    onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+                    className="w-full bg-neutral-800 rounded-lg px-3 py-2 text-sm outline-none"
+                    placeholder={providerMeta.nameHint}
                   />
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-xs text-neutral-400">Model</label>
+                  <label className="text-xs text-neutral-400">Model ID</label>
                   <input
                     type="text"
-                    value={draftConfig.model}
-                    onChange={(e) => setDraftConfig((c) => ({ ...c, model: e.target.value }))}
+                    value={draft.model}
+                    onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
                     dir="ltr"
                     className="w-full bg-neutral-800 rounded-lg px-3 py-2 text-sm outline-none"
+                    placeholder={providerMeta.modelPlaceholder}
                   />
                 </div>
 
                 <label className="flex items-center gap-2 text-xs text-neutral-400">
                   <input
                     type="checkbox"
-                    checked={draftConfig.supportsVision}
-                    onChange={(e) =>
-                      setDraftConfig((c) => ({ ...c, supportsVision: e.target.checked }))
-                    }
+                    checked={draft.supportsVision}
+                    onChange={(e) => setDraft((d) => ({ ...d, supportsVision: e.target.checked }))}
                   />
-                  الموديل ده بيقرأ صور (Vision)
+                  بيدعم Vision (صور) — لازم للكاميرا
                 </label>
+
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={saveModel}
+                    disabled={settingsBusy}
+                    className="flex-1 bg-amber-600 hover:bg-amber-500 text-white font-medium py-2.5 rounded-xl disabled:opacity-50"
+                  >
+                    {settingsBusy ? "بيحفظ..." : "حفظ الموديل"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditing(false);
+                      setDraft(EMPTY_DRAFT);
+                    }}
+                    className="px-4 py-2.5 rounded-xl bg-neutral-800 text-sm"
+                  >
+                    إلغاء
+                  </button>
+                </div>
               </div>
             )}
-
-            <button
-              onClick={saveSettings}
-              className="w-full bg-amber-600 hover:bg-amber-500 text-white font-medium py-2.5 rounded-xl"
-            >
-              حفظ
-            </button>
-            <p className="text-[11px] text-neutral-600 text-center">
-              الإعدادات بتتحفظ في المتصفح، مش على السيرفر.
-            </p>
           </div>
         </div>
       )}

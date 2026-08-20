@@ -1,0 +1,55 @@
+{
+  "activeId": "or-gemini-flash",
+  "models": [
+    {
+      "id": "or-gemini-flash",
+      "name": "OpenRouter · Gemini Flash",
+      "provider": "openrouter",
+      "baseUrl": "https://openrouter.ai/api/v1/chat/completions",
+      "model": "google/gemini-2.0-flash-001",
+      "supportsVision": true,
+      "supportsWebSearch": false,
+      "envKey": "OPENROUTER_API_KEY"
+    },
+    {
+      "id": "or-gpt-4o-mini",
+      "name": "OpenRouter · GPT-4o mini",
+      "provider": "openrouter",
+      "baseUrl": "https://openrouter.ai/api/v1/chat/completions",
+      "model": "openai/gpt-4o-mini",
+      "supportsVision": true,
+      "supportsWebSearch": false,
+      "envKey": "OPENROUTER_API_KEY"
+    },
+    {
+      "id": "gemini-flash",
+      "name": "Gemini 2.0 Flash مباشر",
+      "provider": "gemini",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+      "model": "gemini-2.0-flash",
+      "supportsVision": true,
+      "supportsWebSearch": false,
+      "envKey": "GEMINI_API_KEY"
+    },
+    {
+      "id": "zenmux-glm-5.3-free",
+      "name": "GLM 5.3 Free (ZenMux)",
+      "provider": "zenmux",
+      "baseUrl": "https://zenmux.ai/api/v1/chat/completions",
+      "model": "z-ai/glm-5.3-free",
+      "supportsVision": false,
+      "supportsWebSearch": false,
+      "envKey": "ZENMUX_API_KEY"
+    },
+    {
+      "id": "claude-builtin",
+      "name": "Claude (مدمج)",
+      "provider": "anthropic",
+      "baseUrl": "https://api.anthropic.com/v1/messages",
+      "model": "claude-sonnet-4-6",
+      "supportsVision": true,
+      "supportsWebSearch": true,
+      "envKey": "ANTHROPIC_API_KEY"
+    }
+  ]
+}
