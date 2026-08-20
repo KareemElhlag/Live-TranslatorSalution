@@ -12,6 +12,8 @@ import {
   Plus,
   Trash2,
   Check,
+  Copy,
+  Bug,
 } from "lucide-react";
 
 const PROVIDER_DEFAULTS = {
@@ -55,6 +57,11 @@ const EMPTY_DRAFT = {
   supportsVision: true,
 };
 
+const MAX_ERROR_LOG = 40;
+
+const VISION_PROMPT =
+  'You are a camera OCR+translate agent. Read the single most prominent English or Russian text near the center (one sentence or one question only). Reply with ONLY valid JSON, no markdown: {"found":true,"original":"<exact text>","translation":"<Arabic>"}. If nothing readable: {"found":false}.';
+
 function looksLikeQuestion(original, translatedArabic) {
   const src = (original || "").trim();
   const ar = (translatedArabic || "").trim();
@@ -68,12 +75,11 @@ function looksLikeQuestion(original, translatedArabic) {
 function normalizeCapture(parsed) {
   if (!parsed?.found) return [];
   if (Array.isArray(parsed.items) && parsed.items.length) {
-    return parsed.items
-      .map((item) => ({
-        original: String(item.original || "").trim(),
-        translation: String(item.translation || "").trim(),
-      }))
-      .filter((item) => item.original || item.translation);
+    const item = parsed.items[0];
+    const original = String(item?.original || "").trim();
+    const translation = String(item?.translation || "").trim();
+    if (!original && !translation) return [];
+    return [{ original, translation }];
   }
   const original = String(parsed.original || "").trim();
   const translation = String(parsed.translation || "").trim();
@@ -102,7 +108,8 @@ function parseModelJson(rawText) {
     if (parsed) return parsed;
   }
 
-  throw new Error("الموديل رجّع رد مش JSON. جرّب موديل Vision تاني أو زوّد وضوح النص في الصورة.");
+  const preview = clean.slice(0, 180).replace(/\s+/g, " ");
+  throw new Error(`الموديل رجّع رد مش JSON. preview="${preview}"`);
 }
 
 async function readJsonResponse(response) {
@@ -131,6 +138,14 @@ async function readJsonResponse(response) {
   }
 }
 
+function formatErrorTime(ts) {
+  try {
+    return new Date(ts).toLocaleTimeString("ar-EG", { hour12: false });
+  } catch {
+    return String(ts);
+  }
+}
+
 export default function LiveTranslator() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -140,16 +155,20 @@ export default function LiveTranslator() {
   const searchingRef = useRef(false);
   const lastCaptureKeyRef = useRef("");
   const lastSearchKeyRef = useRef("");
+  const lastRequestAtRef = useRef(0);
+  const intervalMsRef = useRef(10000);
 
   const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
   const [lines, setLines] = useState([]);
-  const [interval_, setInterval_] = useState(3000);
+  const [interval_, setInterval_] = useState(10000);
   const [facing, setFacing] = useState("environment");
   const [searching, setSearching] = useState(false);
   const [searchInfo, setSearchInfo] = useState("");
   const [searchError, setSearchError] = useState("");
+  const [errorLog, setErrorLog] = useState([]);
+  const [showErrors, setShowErrors] = useState(false);
+  const [copyOk, setCopyOk] = useState("");
 
   const [showSettings, setShowSettings] = useState(false);
   const [models, setModels] = useState([]);
@@ -165,6 +184,41 @@ export default function LiveTranslator() {
   const [draft, setDraft] = useState(EMPTY_DRAFT);
 
   const activeModel = models.find((m) => m.id === activeId) || models[0] || null;
+  const primaryLine = lines[0] || null;
+
+  useEffect(() => {
+    intervalMsRef.current = interval_;
+  }, [interval_]);
+
+  const pushError = useCallback((source, message, detail = "") => {
+    const entry = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      ts: Date.now(),
+      source,
+      message: String(message || "unknown error"),
+      detail: String(detail || ""),
+    };
+    setErrorLog((prev) => [entry, ...prev].slice(0, MAX_ERROR_LOG));
+  }, []);
+
+  const formatErrorLogText = useCallback((entries = errorLog) => {
+    return entries
+      .map((e) => {
+        const head = `[${formatErrorTime(e.ts)}] ${e.source}: ${e.message}`;
+        return e.detail ? `${head}\n  detail: ${e.detail}` : head;
+      })
+      .join("\n\n");
+  }, [errorLog]);
+
+  const copyText = useCallback(async (text, okMsg = "تم النسخ") => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyOk(okMsg);
+      setTimeout(() => setCopyOk(""), 2000);
+    } catch {
+      pushError("clipboard", "المتصفح منع النسخ — انسخ يدوي من القائمة");
+    }
+  }, [pushError]);
 
   const refreshModels = useCallback(async () => {
     setModelsLoading(true);
@@ -184,7 +238,8 @@ export default function LiveTranslator() {
         try {
           const presetData = await readJsonResponse(presetsRes);
           setPresets(presetData.presets || []);
-        } catch {
+        } catch (e) {
+          pushError("presets", e.message);
           setPresets([]);
         }
       }
@@ -192,27 +247,27 @@ export default function LiveTranslator() {
         try {
           const keysData = await readJsonResponse(keysRes);
           setKeySlots(keysData.keys || []);
-        } catch {
+        } catch (e) {
+          pushError("keys", e.message);
           setKeySlots([]);
         }
       }
     } catch (e) {
       setSettingsError(e.message);
-      setError(e.message);
+      pushError("models", e.message);
     } finally {
       setModelsLoading(false);
     }
-  }, []);
+  }, [pushError]);
 
   useEffect(() => {
     refreshModels();
   }, [refreshModels]);
 
   const startCamera = useCallback(async () => {
-    setError("");
     try {
       if (!navigator.mediaDevices?.getUserMedia) {
-        setError("المتصفح ده مش بيدعم الكاميرا. جرّب Chrome أو Safari وعلى HTTPS.");
+        pushError("camera", "المتصفح مش بيدعم الكاميرا — استخدم Chrome/Safari وHTTPS");
         return;
       }
       if (streamRef.current) {
@@ -227,10 +282,10 @@ export default function LiveTranslator() {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
       }
-    } catch {
-      setError("مقدرش أوصل للكاميرا. فعّل الإذن، واستخدم HTTPS بعد الديبلوي (الكاميرا مش بتشتغل على HTTP).");
+    } catch (e) {
+      pushError("camera", "مقدرش أوصل للكاميرا", e.message);
     }
-  }, [facing]);
+  }, [facing, pushError]);
 
   useEffect(() => {
     startCamera();
@@ -246,7 +301,7 @@ export default function LiveTranslator() {
       body: JSON.stringify({ imageBase64, prompt }),
     });
     const data = await readJsonResponse(response);
-    if (!response.ok) throw new Error(data?.error || `server error ${response.status}`);
+    if (!response.ok) throw new Error(data?.error || `vision HTTP ${response.status}`);
     return (data.text || "").trim();
   }, []);
 
@@ -257,50 +312,82 @@ export default function LiveTranslator() {
       body: JSON.stringify({ prompt }),
     });
     const data = await readJsonResponse(response);
-    if (!response.ok) throw new Error(data?.error || `server error ${response.status}`);
+    if (!response.ok) throw new Error(data?.error || `search HTTP ${response.status}`);
     return { text: (data.text || "").trim(), model: data.model };
   }, []);
 
-  const primaryLine = lines[0] || null;
-
-  const runSearch = useCallback(async (textToSearch, translationHint = "") => {
-    const q = (textToSearch || "").trim();
-    if (!q || searchingRef.current) return;
-    if (q === lastSearchKeyRef.current) return;
-
-    searchingRef.current = true;
-    lastSearchKeyRef.current = q;
-    setSearching(true);
-    setSearchError("");
-    setSearchInfo("");
-    try {
-      const isQ = looksLikeQuestion(q, translationHint);
-      const prompt = isQ
-        ? `The user pointed a camera at this question: "${q}". Answer the question helpfully in Arabic in 2-4 short sentences. Be concrete. Do not only translate — give an actual answer or useful explanation.`
-        : `The user pointed a camera at this text: "${q}". Give a short useful explanation or context in Arabic (2-4 sentences). Do not only repeat the translation.`;
-
-      const { text } = await callSearch(prompt);
-      if (text) {
-        setSearchInfo(text);
-      } else {
-        setSearchError("مقدرش ألاقي إجابة دلوقتي.");
+  const runAgentVision = useCallback(
+    async (base64) => {
+      let lastError = null;
+      let lastRaw = "";
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const rawText = await callVision(base64, VISION_PROMPT);
+          lastRaw = rawText;
+          const parsed = parseModelJson(rawText);
+          return normalizeCapture(parsed);
+        } catch (e) {
+          lastError = e;
+          pushError(
+            "vision",
+            `محاولة ${attempt}/2: ${e.message}`,
+            lastRaw ? `raw=${lastRaw.slice(0, 240)}` : ""
+          );
+        }
       }
-    } catch (e) {
-      setSearchError(e.message || "حصل خطأ أثناء جلب الإجابة.");
-    } finally {
-      searchingRef.current = false;
-      setSearching(false);
-    }
-  }, [callSearch]);
+      throw lastError || new Error("فشل Vision agent");
+    },
+    [callVision, pushError]
+  );
+
+  const runSearch = useCallback(
+    async (textToSearch, translationHint = "", { force = false } = {}) => {
+      const q = (textToSearch || "").trim();
+      if (!q || searchingRef.current) return;
+      if (!force && q === lastSearchKeyRef.current) return;
+
+      searchingRef.current = true;
+      lastSearchKeyRef.current = q;
+      setSearching(true);
+      setSearchError("");
+      setSearchInfo("");
+      try {
+        const isQ = looksLikeQuestion(q, translationHint);
+        const prompt = isQ
+          ? `The user pointed a camera at this question: "${q}". Answer in Arabic in 2-3 short sentences. Be concrete. Do not only translate.`
+          : `The user pointed a camera at this text: "${q}". Give a short useful explanation in Arabic (2-3 sentences). Do not only repeat the translation.`;
+
+        const { text } = await callSearch(prompt);
+        if (text) setSearchInfo(text);
+        else {
+          setSearchError("مقدرش ألاقي إجابة دلوقتي.");
+          pushError("answer", "رد الإجابة فاضي", q);
+        }
+      } catch (e) {
+        const msg = e.message || "حصل خطأ أثناء جلب الإجابة.";
+        setSearchError(msg);
+        pushError("answer", msg, q);
+      } finally {
+        searchingRef.current = false;
+        setSearching(false);
+      }
+    },
+    [callSearch, pushError]
+  );
 
   const captureAndTranslate = useCallback(async () => {
     if (!videoRef.current || !canvasRef.current || busyRef.current) return;
     const video = videoRef.current;
     if (video.videoWidth === 0) return;
 
+    const gapMs = intervalMsRef.current + 1000;
+    const now = Date.now();
+    if (now - lastRequestAtRef.current < gapMs) return;
+
     if (activeModel && !activeModel.supportsVision) {
-      setError(
-        `الموديل "${activeModel.name}" مش بيدعم قراءة الصور. من الإعدادات اختار موديل Vision (OpenRouter / Gemini).`
+      pushError(
+        "agent",
+        `الموديل "${activeModel.name}" مش Vision — غيّره من الإعدادات`
       );
       setRunning(false);
       return;
@@ -311,19 +398,14 @@ export default function LiveTranslator() {
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext("2d");
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
     const base64 = dataUrl.split(",")[1];
 
+    lastRequestAtRef.current = Date.now();
     busyRef.current = true;
     setBusy(true);
-    setError("");
     try {
-      const prompt =
-        'Look at this camera image. Focus on the most prominent readable English or Russian text near the center of the frame (prefer a full sentence or question, not UI chrome). Respond ONLY with JSON: {"found": true, "items": [{"original": "<exact source text>", "translation": "<Arabic translation>"}]}. You may return 1-3 items if several clear lines are visible. If nothing readable: {"found": false}. No markdown, no extra words.';
-
-      const rawText = await callVision(base64, prompt);
-      const parsed = parseModelJson(rawText);
-      const captured = normalizeCapture(parsed);
+      const captured = await runAgentVision(base64);
       if (!captured.length) return;
 
       const captureKey = captured.map((l) => l.original).join("||");
@@ -338,12 +420,12 @@ export default function LiveTranslator() {
       const first = captured[0];
       runSearch(first.original, first.translation);
     } catch (e) {
-      setError(e.message || "حصل خطأ في الترجمة، هنحاول تاني.");
+      pushError("agent", e.message || "فشل مسار الترجمة");
     } finally {
       busyRef.current = false;
       setBusy(false);
     }
-  }, [activeModel, callVision, runSearch]);
+  }, [activeModel, runAgentVision, runSearch, pushError]);
 
   useEffect(() => {
     if (!running) {
@@ -405,6 +487,7 @@ export default function LiveTranslator() {
       await refreshModels();
     } catch (e) {
       setSettingsError(e.message);
+      pushError("keys-save", e.message);
     } finally {
       setSettingsBusy(false);
     }
@@ -422,9 +505,9 @@ export default function LiveTranslator() {
       const data = await readJsonResponse(res);
       if (!res.ok) throw new Error(data?.error || "فشل تفعيل الموديل");
       setActiveId(data.activeId);
-      setError("");
     } catch (e) {
       setSettingsError(e.message);
+      pushError("model-active", e.message);
     } finally {
       setSettingsBusy(false);
     }
@@ -483,6 +566,7 @@ export default function LiveTranslator() {
       setSettingsOk("الموديل اتحفظ في models.json (من غير مفاتيح).");
     } catch (e) {
       setSettingsError(e.message);
+      pushError("model-save", e.message);
     } finally {
       setSettingsBusy(false);
     }
@@ -500,6 +584,7 @@ export default function LiveTranslator() {
       setActiveId(data.activeId || "");
     } catch (e) {
       setSettingsError(e.message);
+      pushError("model-delete", e.message);
     } finally {
       setSettingsBusy(false);
     }
@@ -512,7 +597,19 @@ export default function LiveTranslator() {
       <header className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
         <h1 className="text-base font-semibold tracking-tight">مترجم لايف</h1>
         <div className="flex items-center gap-3">
-          <span className="text-xs text-neutral-500">إنجليزي / روسي ← عربي</span>
+          <span className="text-xs text-neutral-500 hidden sm:inline">إنجليزي / روسي ← عربي</span>
+          <button
+            onClick={() => setShowErrors(true)}
+            className="relative text-neutral-400 hover:text-amber-400 flex items-center gap-1 text-xs"
+            aria-label="سجل الأخطاء"
+          >
+            <Bug size={16} />
+            {errorLog.length > 0 && (
+              <span className="min-w-5 h-5 px-1 rounded-full bg-red-600 text-white text-[10px] flex items-center justify-center">
+                {errorLog.length}
+              </span>
+            )}
+          </button>
           <button
             onClick={openSettings}
             className="text-neutral-400 hover:text-neutral-200"
@@ -535,99 +632,65 @@ export default function LiveTranslator() {
         <canvas ref={canvasRef} className="hidden" />
 
         {busy && (
-          <div className="absolute top-3 left-3 bg-neutral-900/80 backdrop-blur px-3 py-1.5 rounded-full flex items-center gap-2 text-xs z-10">
+          <div className="absolute top-3 left-3 bg-black/40 backdrop-blur-sm px-3 py-1.5 rounded-full flex items-center gap-2 text-xs z-10">
             <Loader2 size={14} className="animate-spin" />
-            بيترجم...
+            Agent بيترجم...
           </div>
         )}
 
         <button
           onClick={flipCamera}
-          className="absolute top-3 right-3 bg-neutral-900/80 backdrop-blur p-2 rounded-full z-10"
+          className="absolute top-3 right-3 bg-black/40 backdrop-blur-sm p-2 rounded-full z-10"
           aria-label="قلب الكاميرا"
         >
           <RotateCcw size={16} />
         </button>
 
-        {lines.length > 0 && (
-          <div className="absolute inset-x-3 bottom-3 top-14 z-10 flex flex-col justify-end pointer-events-none">
-            <div className="space-y-2 max-h-full overflow-y-auto pointer-events-auto">
-              {lines.map((line, idx) => {
-                const showAnswer = idx === 0;
-                return (
-                  <div
-                    key={`${line.original}-${idx}`}
-                    className="bg-neutral-950/88 backdrop-blur rounded-2xl px-4 py-3 border border-neutral-700/80 space-y-2"
-                  >
-                    {line.translation && (
-                      <div>
-                        <p className="text-[10px] text-amber-500/80 mb-0.5">الترجمة</p>
-                        <p className="text-base sm:text-lg leading-snug font-semibold text-amber-400">
-                          {line.translation}
-                        </p>
-                      </div>
-                    )}
-
-                    {line.original && (
-                      <div className="border-t border-neutral-800 pt-2">
-                        <p className="text-[10px] text-neutral-500 mb-0.5">الأصل</p>
-                        <p className="text-sm text-neutral-100 leading-relaxed" dir="ltr">
-                          {line.original}
-                        </p>
-                      </div>
-                    )}
-
-                    {showAnswer && (
-                      <div className="border-t border-neutral-800 pt-2">
-                        <p className="text-[10px] text-emerald-500/80 mb-0.5 flex items-center gap-1">
-                          {searching ? (
-                            <>
-                              <Loader2 size={10} className="animate-spin" />
-                              جاري جلب الإجابة تلقائيًا...
-                            </>
-                          ) : (
-                            "الإجابة / الشرح"
-                          )}
-                        </p>
-                        {searchInfo && (
-                          <p className="text-sm text-emerald-100/95 leading-relaxed whitespace-pre-line">
-                            {searchInfo}
-                          </p>
-                        )}
-                        {searchError && <p className="text-xs text-red-400">{searchError}</p>}
-                        {!searching && !searchInfo && !searchError && (
-                          <p className="text-xs text-neutral-500">هتظهر الإجابة هنا تلقائي بعد الترجمة</p>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+        {primaryLine && (
+          <div className="absolute inset-x-3 bottom-3 z-10 pointer-events-none">
+            <div className="bg-black/35 backdrop-blur-md rounded-2xl px-3.5 py-3 border border-white/15 space-y-1.5 max-w-xl mx-auto pointer-events-auto">
+              {primaryLine.translation && (
+                <p className="text-base sm:text-lg leading-snug font-semibold text-amber-300 drop-shadow">
+                  {primaryLine.translation}
+                </p>
+              )}
+              {primaryLine.original && (
+                <p className="text-sm text-white/90 leading-relaxed drop-shadow" dir="ltr">
+                  {primaryLine.original}
+                </p>
+              )}
+              <div className="pt-1 border-t border-white/10">
+                {searching ? (
+                  <p className="text-xs text-emerald-200/90 flex items-center gap-1">
+                    <Loader2 size={11} className="animate-spin" />
+                    جاري الإجابة تلقائيًا...
+                  </p>
+                ) : searchInfo ? (
+                  <p className="text-sm text-emerald-100/95 leading-relaxed whitespace-pre-line">
+                    {searchInfo}
+                  </p>
+                ) : searchError ? (
+                  <p className="text-xs text-red-200">{searchError}</p>
+                ) : (
+                  <p className="text-[11px] text-white/50">الإجابة هتظهر هنا تلقائي</p>
+                )}
+              </div>
             </div>
-          </div>
-        )}
-
-        {error && (
-          <div className="absolute top-14 left-3 right-3 bg-red-950/90 border border-red-800 text-red-200 text-xs px-3 py-2 rounded-lg flex items-center gap-2 z-20">
-            <AlertCircle size={14} className="shrink-0" />
-            {error}
           </div>
         )}
       </div>
 
       <div className="bg-neutral-900 border-t border-neutral-800 px-4 py-4 space-y-3">
-        {!lines.length && (
+        {!primaryLine && (
           <p className="text-sm text-neutral-500 text-center py-1">
-            وجّه الكاميرا على نص — الترجمة فوق والأصل في النص والإجابة تحت، والبحث تلقائي
+            وجّه الكاميرا على سطر واحد — الترجمة فوق / الأصل / الإجابة تحت · الالتقاط كل{" "}
+            {interval_ / 1000}ث
           </p>
         )}
 
         {primaryLine && (
           <button
-            onClick={() => {
-              lastSearchKeyRef.current = "";
-              runSearch(primaryLine.original, primaryLine.translation);
-            }}
+            onClick={() => runSearch(primaryLine.original, primaryLine.translation, { force: true })}
             disabled={searching}
             className="flex items-center gap-2 text-xs text-amber-500 hover:text-amber-400 disabled:opacity-50"
           >
@@ -648,7 +711,7 @@ export default function LiveTranslator() {
 
         <div className="flex items-center justify-center gap-2 text-xs text-neutral-500">
           <span>سرعة الالتقاط:</span>
-          {[2000, 3000, 5000].map((ms) => (
+          {[5000, 10000, 15000].map((ms) => (
             <button
               key={ms}
               onClick={() => setInterval_(ms)}
@@ -660,13 +723,86 @@ export default function LiveTranslator() {
             </button>
           ))}
         </div>
-
         <p className="text-[11px] text-neutral-600 text-center">
-          الموديل: {activeModel ? activeModel.name : "جارٍ التحميل..."}
+          قفل الطلبات = الالتقاط + 1ث · الموديل:{" "}
+          {activeModel ? activeModel.name : "جارٍ التحميل..."}
           {activeModel?.supportsVision ? " · Vision" : activeModel ? " · نص فقط" : ""}
           {activeModel?.hasApiKey === false ? " · مفتاح ناقص" : ""}
         </p>
       </div>
+
+      {showErrors && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-3">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl w-full max-w-md p-4 space-y-3 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold flex items-center gap-2">
+                <Bug size={16} /> سجل أخطاء الـ Agent ({errorLog.length})
+              </h2>
+              <button onClick={() => setShowErrors(false)} aria-label="إغلاق">
+                <X size={18} />
+              </button>
+            </div>
+            <p className="text-[11px] text-neutral-500">
+              انسخ الأخطاء وابعتها عشان ندبج حلقة الـ AI. الأخطاء متتجاهلاش — متخزنة هنا.
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => copyText(formatErrorLogText(), "اتنسخ السجل كامل")}
+                disabled={!errorLog.length}
+                className="flex-1 flex items-center justify-center gap-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white text-sm py-2 rounded-xl"
+              >
+                <Copy size={14} /> نسخ الكل
+              </button>
+              <button
+                type="button"
+                onClick={() => setErrorLog([])}
+                disabled={!errorLog.length}
+                className="px-3 py-2 rounded-xl bg-neutral-800 text-sm disabled:opacity-40"
+              >
+                مسح
+              </button>
+            </div>
+            {copyOk && <p className="text-xs text-emerald-400">{copyOk}</p>}
+            <div className="overflow-y-auto space-y-2 flex-1 min-h-0">
+              {!errorLog.length ? (
+                <p className="text-sm text-neutral-500 text-center py-8">مفيش أخطاء لسه</p>
+              ) : (
+                errorLog.map((e) => (
+                  <div key={e.id} className="bg-neutral-800/70 rounded-xl p-3 space-y-1.5">
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-[11px] text-neutral-400" dir="ltr">
+                        [{formatErrorTime(e.ts)}] {e.source}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          copyText(
+                            `[${formatErrorTime(e.ts)}] ${e.source}: ${e.message}${
+                              e.detail ? `\n  detail: ${e.detail}` : ""
+                            }`,
+                            "اتنسخ الخطأ"
+                          )
+                        }
+                        className="text-neutral-400 hover:text-neutral-200"
+                        aria-label="نسخ"
+                      >
+                        <Copy size={13} />
+                      </button>
+                    </div>
+                    <p className="text-xs text-red-200 leading-relaxed">{e.message}</p>
+                    {e.detail && (
+                      <p className="text-[11px] text-neutral-500 break-all" dir="ltr">
+                        {e.detail}
+                      </p>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {showSettings && (
         <div className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-3">
@@ -681,9 +817,8 @@ export default function LiveTranslator() {
             <div className="flex items-start gap-2 text-xs text-neutral-400 bg-neutral-800/50 rounded-lg p-2.5">
               <Info size={14} className="shrink-0 mt-0.5" />
               <span>
-                حط مفتاح <b>OpenRouter</b> مرة واحدة تحت، وبعدين ضيف أي model id من عندهم (Google أو
-                OpenAI أو غيرهم). المفاتيح في <span dir="ltr">keys.json</span>، والموديلات في{" "}
-                <span dir="ltr">models.json</span> من غير أسرار.
+                حط مفتاح <b>OpenRouter</b> مرة واحدة، وبعدين ضيف أي model id. الأخطاء من زر الحشرة
+                فوق عشان الندبج.
               </span>
             </div>
 
@@ -754,7 +889,9 @@ export default function LiveTranslator() {
                     <div
                       key={m.id}
                       className={`rounded-xl border px-3 py-2.5 ${
-                        isActive ? "border-amber-600 bg-amber-950/20" : "border-neutral-800 bg-neutral-800/40"
+                        isActive
+                          ? "border-amber-600 bg-amber-950/20"
+                          : "border-neutral-800 bg-neutral-800/40"
                       }`}
                     >
                       <div className="flex items-start justify-between gap-2">
