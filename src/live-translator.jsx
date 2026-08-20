@@ -66,13 +66,52 @@ function looksLikeQuestion(original, translatedArabic) {
 }
 
 function parseModelJson(rawText) {
-  const clean = (rawText || "").replace(/```json|```/g, "").trim();
+  const clean = (rawText || "").replace(/```json|```/gi, "").replace(/```/g, "").trim();
+  if (!clean) throw new Error("الموديل رجّع رد فاضي");
+
+  const tryParse = (text) => {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  };
+
+  let parsed = tryParse(clean);
+  if (parsed) return parsed;
+
+  const match = clean.match(/\{[\s\S]*\}/);
+  if (match) {
+    parsed = tryParse(match[0]);
+    if (parsed) return parsed;
+  }
+
+  throw new Error("الموديل رجّع رد مش JSON. جرّب موديل Vision تاني أو زوّد وضوح النص في الصورة.");
+}
+
+async function readJsonResponse(response) {
+  const raw = await response.text();
+  const trimmed = (raw || "").trim();
+  if (!trimmed) {
+    throw new Error(
+      response.ok
+        ? "السيرفر رجّع رد فاضي"
+        : `السيرفر مش متاح (${response.status}). شغّل npm run dev`
+    );
+  }
+  if (trimmed.startsWith("<") || trimmed.startsWith("<!")) {
+    throw new Error(
+      "الطلب وصل لصفحة HTML مش API. تأكد إن السيرفر شغال بـ npm run dev وإنك فاتح http://localhost:5173"
+    );
+  }
   try {
-    return JSON.parse(clean);
+    return JSON.parse(trimmed);
   } catch {
-    const match = clean.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error("invalid json");
-    return JSON.parse(match[0]);
+    throw new Error(
+      response.ok
+        ? `رد مش مفهوم من السيرفر: ${trimmed.slice(0, 80)}`
+        : trimmed.slice(0, 160) || `server error ${response.status}`
+    );
   }
 }
 
@@ -120,21 +159,30 @@ export default function LiveTranslator() {
         fetch("/api/models/presets"),
         fetch("/api/keys"),
       ]);
-      const data = await modelsRes.json();
+      const data = await readJsonResponse(modelsRes);
       if (!modelsRes.ok) throw new Error(data?.error || "فشل تحميل الموديلات");
       setModels(data.models || []);
       setActiveId(data.activeId || data.models?.[0]?.id || "");
 
       if (presetsRes.ok) {
-        const presetData = await presetsRes.json();
-        setPresets(presetData.presets || []);
+        try {
+          const presetData = await readJsonResponse(presetsRes);
+          setPresets(presetData.presets || []);
+        } catch {
+          setPresets([]);
+        }
       }
       if (keysRes.ok) {
-        const keysData = await keysRes.json();
-        setKeySlots(keysData.keys || []);
+        try {
+          const keysData = await readJsonResponse(keysRes);
+          setKeySlots(keysData.keys || []);
+        } catch {
+          setKeySlots([]);
+        }
       }
     } catch (e) {
       setSettingsError(e.message);
+      setError(e.message);
     } finally {
       setModelsLoading(false);
     }
@@ -181,7 +229,7 @@ export default function LiveTranslator() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ imageBase64, prompt }),
     });
-    const data = await response.json().catch(() => ({}));
+    const data = await readJsonResponse(response);
     if (!response.ok) throw new Error(data?.error || `server error ${response.status}`);
     return (data.text || "").trim();
   }, []);
@@ -192,7 +240,7 @@ export default function LiveTranslator() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt }),
     });
-    const data = await response.json().catch(() => ({}));
+    const data = await readJsonResponse(response);
     if (!response.ok) throw new Error(data?.error || `server error ${response.status}`);
     return { text: (data.text || "").trim(), model: data.model };
   }, []);
@@ -330,7 +378,7 @@ export default function LiveTranslator() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = await res.json();
+      const data = await readJsonResponse(res);
       if (!res.ok) throw new Error(data?.error || "فشل حفظ المفاتيح");
       setKeySlots(data.keys || []);
       setKeyDrafts({});
@@ -352,7 +400,7 @@ export default function LiveTranslator() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id }),
       });
-      const data = await res.json();
+      const data = await readJsonResponse(res);
       if (!res.ok) throw new Error(data?.error || "فشل تفعيل الموديل");
       setActiveId(data.activeId);
       setError("");
@@ -408,7 +456,7 @@ export default function LiveTranslator() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = await res.json();
+      const data = await readJsonResponse(res);
       if (!res.ok) throw new Error(data?.error || "فشل حفظ الموديل");
       await refreshModels();
       setEditing(false);
@@ -427,7 +475,7 @@ export default function LiveTranslator() {
     setSettingsError("");
     try {
       const res = await fetch(`/api/models/${encodeURIComponent(id)}`, { method: "DELETE" });
-      const data = await res.json();
+      const data = await readJsonResponse(res);
       if (!res.ok) throw new Error(data?.error || "فشل المسح");
       setModels(data.models || []);
       setActiveId(data.activeId || "");
