@@ -65,6 +65,22 @@ function looksLikeQuestion(original, translatedArabic) {
   return starters.test(src);
 }
 
+function normalizeCapture(parsed) {
+  if (!parsed?.found) return [];
+  if (Array.isArray(parsed.items) && parsed.items.length) {
+    return parsed.items
+      .map((item) => ({
+        original: String(item.original || "").trim(),
+        translation: String(item.translation || "").trim(),
+      }))
+      .filter((item) => item.original || item.translation);
+  }
+  const original = String(parsed.original || "").trim();
+  const translation = String(parsed.translation || "").trim();
+  if (!original && !translation) return [];
+  return [{ original, translation }];
+}
+
 function parseModelJson(rawText) {
   const clean = (rawText || "").replace(/```json|```/gi, "").replace(/```/g, "").trim();
   if (!clean) throw new Error("الموديل رجّع رد فاضي");
@@ -122,18 +138,18 @@ export default function LiveTranslator() {
   const intervalRef = useRef(null);
   const busyRef = useRef(false);
   const searchingRef = useRef(false);
+  const lastCaptureKeyRef = useRef("");
+  const lastSearchKeyRef = useRef("");
 
   const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [original, setOriginal] = useState("");
-  const [translated, setTranslated] = useState("");
+  const [lines, setLines] = useState([]);
   const [interval_, setInterval_] = useState(3000);
   const [facing, setFacing] = useState("environment");
   const [searching, setSearching] = useState(false);
   const [searchInfo, setSearchInfo] = useState("");
   const [searchError, setSearchError] = useState("");
-  const [autoSearched, setAutoSearched] = useState(false);
 
   const [showSettings, setShowSettings] = useState(false);
   const [models, setModels] = useState([]);
@@ -245,37 +261,37 @@ export default function LiveTranslator() {
     return { text: (data.text || "").trim(), model: data.model };
   }, []);
 
-  const runSearch = useCallback(
-    async (textToSearch) => {
-      const q = textToSearch ?? original;
-      if (!q || searchingRef.current) return;
-      searchingRef.current = true;
-      setSearching(true);
-      setAutoSearched(true);
-      setSearchError("");
-      setSearchInfo("");
-      try {
-        const prompt = `Search the web for helpful context about this text that was captured from a camera: "${q}". It could be a product, a sign, a menu item, a place, a brand, or general information, or it could be a question someone is asking about what they're looking at. Give a short, useful explanation or answer in Arabic (3-5 sentences max), written for someone who just saw this in real life. Do not just repeat the translation, add real extra context.`;
+  const primaryLine = lines[0] || null;
 
-        const { text, model } = await callSearch(prompt);
-        if (text) {
-          const note =
-            model && !model.supportsWebSearch
-              ? "\n\n(ملاحظة: الموديل الحالي مش بيعمل بحث حي، الإجابة من معرفة الموديل بس)"
-              : "";
-          setSearchInfo(`${text}${note}`);
-        } else {
-          setSearchError("مقدرش ألاقي معلومات إضافية دلوقتي.");
-        }
-      } catch (e) {
-        setSearchError(e.message || "حصل خطأ أثناء البحث، جرب تاني.");
-      } finally {
-        searchingRef.current = false;
-        setSearching(false);
+  const runSearch = useCallback(async (textToSearch, translationHint = "") => {
+    const q = (textToSearch || "").trim();
+    if (!q || searchingRef.current) return;
+    if (q === lastSearchKeyRef.current) return;
+
+    searchingRef.current = true;
+    lastSearchKeyRef.current = q;
+    setSearching(true);
+    setSearchError("");
+    setSearchInfo("");
+    try {
+      const isQ = looksLikeQuestion(q, translationHint);
+      const prompt = isQ
+        ? `The user pointed a camera at this question: "${q}". Answer the question helpfully in Arabic in 2-4 short sentences. Be concrete. Do not only translate — give an actual answer or useful explanation.`
+        : `The user pointed a camera at this text: "${q}". Give a short useful explanation or context in Arabic (2-4 sentences). Do not only repeat the translation.`;
+
+      const { text } = await callSearch(prompt);
+      if (text) {
+        setSearchInfo(text);
+      } else {
+        setSearchError("مقدرش ألاقي إجابة دلوقتي.");
       }
-    },
-    [original, callSearch]
-  );
+    } catch (e) {
+      setSearchError(e.message || "حصل خطأ أثناء جلب الإجابة.");
+    } finally {
+      searchingRef.current = false;
+      setSearching(false);
+    }
+  }, [callSearch]);
 
   const captureAndTranslate = useCallback(async () => {
     if (!videoRef.current || !canvasRef.current || busyRef.current) return;
@@ -303,21 +319,24 @@ export default function LiveTranslator() {
     setError("");
     try {
       const prompt =
-        'Look at this image. If it contains readable English or Russian text, respond ONLY with a JSON object: {"found": true, "original": "<the text you see>", "translation": "<Arabic translation>"}. If there is no readable English/Russian text, respond ONLY with {"found": false}. No markdown, no extra words.';
+        'Look at this camera image. Focus on the most prominent readable English or Russian text near the center of the frame (prefer a full sentence or question, not UI chrome). Respond ONLY with JSON: {"found": true, "items": [{"original": "<exact source text>", "translation": "<Arabic translation>"}]}. You may return 1-3 items if several clear lines are visible. If nothing readable: {"found": false}. No markdown, no extra words.';
 
       const rawText = await callVision(base64, prompt);
       const parsed = parseModelJson(rawText);
-      if (parsed.found) {
-        setOriginal(parsed.original || "");
-        setTranslated(parsed.translation || "");
-        setSearchInfo("");
-        setSearchError("");
-        setAutoSearched(false);
+      const captured = normalizeCapture(parsed);
+      if (!captured.length) return;
 
-        if (looksLikeQuestion(parsed.original, parsed.translation)) {
-          runSearch(parsed.original);
-        }
-      }
+      const captureKey = captured.map((l) => l.original).join("||");
+      if (captureKey === lastCaptureKeyRef.current) return;
+      lastCaptureKeyRef.current = captureKey;
+
+      setLines(captured);
+      setSearchInfo("");
+      setSearchError("");
+      lastSearchKeyRef.current = "";
+
+      const first = captured[0];
+      runSearch(first.original, first.translation);
     } catch (e) {
       setError(e.message || "حصل خطأ في الترجمة، هنحاول تاني.");
     } finally {
@@ -516,7 +535,7 @@ export default function LiveTranslator() {
         <canvas ref={canvasRef} className="hidden" />
 
         {busy && (
-          <div className="absolute top-3 left-3 bg-neutral-900/80 backdrop-blur px-3 py-1.5 rounded-full flex items-center gap-2 text-xs">
+          <div className="absolute top-3 left-3 bg-neutral-900/80 backdrop-blur px-3 py-1.5 rounded-full flex items-center gap-2 text-xs z-10">
             <Loader2 size={14} className="animate-spin" />
             بيترجم...
           </div>
@@ -524,25 +543,72 @@ export default function LiveTranslator() {
 
         <button
           onClick={flipCamera}
-          className="absolute top-3 right-3 bg-neutral-900/80 backdrop-blur p-2 rounded-full"
+          className="absolute top-3 right-3 bg-neutral-900/80 backdrop-blur p-2 rounded-full z-10"
           aria-label="قلب الكاميرا"
         >
           <RotateCcw size={16} />
         </button>
 
-        {translated && (
-          <div className="absolute bottom-3 left-3 right-3 bg-neutral-950/85 backdrop-blur rounded-xl px-4 py-3 space-y-1">
-            <p className="text-lg leading-snug font-semibold text-amber-400">{translated}</p>
-            {original && (
-              <p className="text-xs text-neutral-400" dir="ltr">
-                {original}
-              </p>
-            )}
+        {lines.length > 0 && (
+          <div className="absolute inset-x-3 bottom-3 top-14 z-10 flex flex-col justify-end pointer-events-none">
+            <div className="space-y-2 max-h-full overflow-y-auto pointer-events-auto">
+              {lines.map((line, idx) => {
+                const showAnswer = idx === 0;
+                return (
+                  <div
+                    key={`${line.original}-${idx}`}
+                    className="bg-neutral-950/88 backdrop-blur rounded-2xl px-4 py-3 border border-neutral-700/80 space-y-2"
+                  >
+                    {line.translation && (
+                      <div>
+                        <p className="text-[10px] text-amber-500/80 mb-0.5">الترجمة</p>
+                        <p className="text-base sm:text-lg leading-snug font-semibold text-amber-400">
+                          {line.translation}
+                        </p>
+                      </div>
+                    )}
+
+                    {line.original && (
+                      <div className="border-t border-neutral-800 pt-2">
+                        <p className="text-[10px] text-neutral-500 mb-0.5">الأصل</p>
+                        <p className="text-sm text-neutral-100 leading-relaxed" dir="ltr">
+                          {line.original}
+                        </p>
+                      </div>
+                    )}
+
+                    {showAnswer && (
+                      <div className="border-t border-neutral-800 pt-2">
+                        <p className="text-[10px] text-emerald-500/80 mb-0.5 flex items-center gap-1">
+                          {searching ? (
+                            <>
+                              <Loader2 size={10} className="animate-spin" />
+                              جاري جلب الإجابة تلقائيًا...
+                            </>
+                          ) : (
+                            "الإجابة / الشرح"
+                          )}
+                        </p>
+                        {searchInfo && (
+                          <p className="text-sm text-emerald-100/95 leading-relaxed whitespace-pre-line">
+                            {searchInfo}
+                          </p>
+                        )}
+                        {searchError && <p className="text-xs text-red-400">{searchError}</p>}
+                        {!searching && !searchInfo && !searchError && (
+                          <p className="text-xs text-neutral-500">هتظهر الإجابة هنا تلقائي بعد الترجمة</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 
         {error && (
-          <div className="absolute top-14 left-3 right-3 bg-red-950/90 border border-red-800 text-red-200 text-xs px-3 py-2 rounded-lg flex items-center gap-2">
+          <div className="absolute top-14 left-3 right-3 bg-red-950/90 border border-red-800 text-red-200 text-xs px-3 py-2 rounded-lg flex items-center gap-2 z-20">
             <AlertCircle size={14} className="shrink-0" />
             {error}
           </div>
@@ -550,26 +616,24 @@ export default function LiveTranslator() {
       </div>
 
       <div className="bg-neutral-900 border-t border-neutral-800 px-4 py-4 space-y-3">
-        {translated ? (
-          <div className="space-y-2">
-            <button
-              onClick={() => runSearch(original)}
-              disabled={searching}
-              className="flex items-center gap-2 text-xs text-amber-500 hover:text-amber-400 disabled:opacity-50"
-            >
-              {searching ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
-              {searching ? "بيدور على إجابة..." : autoSearched ? "دور تاني" : "ابحث عن معلومات إضافية"}
-            </button>
+        {!lines.length && (
+          <p className="text-sm text-neutral-500 text-center py-1">
+            وجّه الكاميرا على نص — الترجمة فوق والأصل في النص والإجابة تحت، والبحث تلقائي
+          </p>
+        )}
 
-            {searchInfo && (
-              <div className="bg-neutral-800/60 rounded-lg p-3 text-sm leading-relaxed whitespace-pre-line">
-                {searchInfo}
-              </div>
-            )}
-            {searchError && <p className="text-xs text-red-400">{searchError}</p>}
-          </div>
-        ) : (
-          <p className="text-sm text-neutral-500 text-center py-2">وجّه الكاميرا على نص وابدأ الترجمة</p>
+        {primaryLine && (
+          <button
+            onClick={() => {
+              lastSearchKeyRef.current = "";
+              runSearch(primaryLine.original, primaryLine.translation);
+            }}
+            disabled={searching}
+            className="flex items-center gap-2 text-xs text-amber-500 hover:text-amber-400 disabled:opacity-50"
+          >
+            {searching ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
+            حدّث الإجابة
+          </button>
         )}
 
         <div className="flex items-center gap-3 pt-1">
