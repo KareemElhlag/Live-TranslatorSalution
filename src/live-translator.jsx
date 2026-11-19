@@ -61,6 +61,145 @@ const EMPTY_DRAFT = {
 
 const MAX_ERROR_LOG = 40;
 
+const SESSION_KEYS_STORAGE_KEY = "live-translator-session-keys";
+
+const DEFAULT_KEY_SLOTS = [
+  {
+    envKey: "OPENROUTER_API_KEY",
+    label: "OpenRouter",
+    set: false,
+    masked: "",
+    source: "missing",
+    hint: "بيتخزن في المتصفح (sessionStorage) وبيتبعت مباشرة لـ OpenRouter من غير سيرفر.",
+  },
+  {
+    envKey: "GEMINI_API_KEY",
+    label: "Google Gemini",
+    set: false,
+    masked: "",
+    source: "missing",
+    hint: "مطلوب لو الموديل المتفعّل من نوع Gemini.",
+  },
+  {
+    envKey: "OPENAI_API_KEY",
+    label: "OpenAI",
+    set: false,
+    masked: "",
+    source: "missing",
+    hint: "مطلوب لو الموديل المتفعّل من نوع OpenAI.",
+  },
+  {
+    envKey: "ANTHROPIC_API_KEY",
+    label: "Anthropic",
+    set: false,
+    masked: "",
+    source: "missing",
+    hint: "مطلوب لو الموديل المتفعّل من نوع Claude.",
+  },
+  {
+    envKey: "ZENMUX_API_KEY",
+    label: "ZenMux",
+    set: false,
+    masked: "",
+    source: "missing",
+    hint: "مطلوب لو الموديل المتفعّل من نوع ZenMux.",
+  },
+];
+
+/** موديلات احتياطية لما الـ /api مش موجود (استضافة static) */
+const FALLBACK_MODELS = [
+  {
+    id: "openrouter-default",
+    name: "OpenRouter · اختياري",
+    provider: "openrouter",
+    model: "google/gemini-3.6-flash",
+    supportsVision: true,
+    hasApiKey: false,
+  },
+];
+
+function readSessionKeys() {
+  try {
+    if (typeof window === "undefined" || !window.sessionStorage) return {};
+    const raw = window.sessionStorage.getItem(SESSION_KEYS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSessionKeys(keys) {
+  try {
+    if (typeof window === "undefined" || !window.sessionStorage) return;
+    window.sessionStorage.setItem(
+      SESSION_KEYS_STORAGE_KEY,
+      JSON.stringify(keys || {})
+    );
+  } catch {
+    // المتصفح ممكن يمنع الستوريدج — المفتاح بيفضل في الميموري لحد ما الصفحة تتقفل
+  }
+}
+
+function maskApiKey(value) {
+  const key = String(value || "").trim();
+  if (!key) return "";
+  if (key.length <= 8) return `${key.slice(0, 2)}…${key.slice(-2)}`;
+  return `${key.slice(0, 6)}…${key.slice(-4)}`;
+}
+
+function mergeKeySlots(serverSlots, sessionKeys) {
+  const byEnv = new Map();
+  for (const slot of DEFAULT_KEY_SLOTS) byEnv.set(slot.envKey, { ...slot });
+
+  for (const slot of serverSlots || []) {
+    if (!slot?.envKey) continue;
+    byEnv.set(slot.envKey, { ...(byEnv.get(slot.envKey) || {}), ...slot });
+  }
+
+  for (const [envKey, value] of Object.entries(sessionKeys || {})) {
+    const trimmed = String(value || "").trim();
+    if (!trimmed) continue;
+    const base = byEnv.get(envKey) || { envKey, label: envKey, hint: "" };
+    byEnv.set(envKey, {
+      ...base,
+      set: true,
+      masked: maskApiKey(trimmed),
+      source: "session",
+    });
+  }
+
+  return Array.from(byEnv.values());
+}
+
+async function callOpenRouterDirect({ apiKey, modelId, messages }) {
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ model: modelId, messages }),
+  });
+
+  const data = await readJsonResponse(response, "OpenRouter");
+  if (!response.ok) {
+    const detail = data?.error?.message || data?.error;
+    throw new Error(
+      (typeof detail === "string" && detail) || `OpenRouter HTTP ${response.status}`
+    );
+  }
+
+  const content = data?.choices?.[0]?.message?.content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (typeof part === "string" ? part : part?.text || ""))
+      .join("")
+      .trim();
+  }
+  return String(content || "").trim();
+}
+
 const VISION_PROMPT = `You are a careful OCR extractor and Arabic translator for a live camera.
 Read the single most prominent English or Russian text near the image center.
 If it is a multiple-choice question, include the question and all visible options in "original".
@@ -296,28 +435,37 @@ function parseModelJson(rawText) {
   throw new Error(`الموديل رجّع رد مش JSON. preview="${preview}"`);
 }
 
-async function readJsonResponse(response) {
+async function readJsonResponse(response, label = "") {
   const raw = await response.text();
   const trimmed = (raw || "").trim();
+  const endpoint = label || response.url || "/api";
+  const contentType = (response.headers?.get?.("content-type") || "").toLowerCase();
+  const looksLikeHtml =
+    trimmed.startsWith("<") ||
+    trimmed.startsWith("<!") ||
+    contentType.includes("text/html");
+
   if (!trimmed) {
     throw new Error(
       response.ok
-        ? "السيرفر رجّع رد فاضي"
-        : `السيرفر مش متاح (${response.status}). شغّل npm run dev`
+        ? `رد فاضي من ${endpoint}`
+        : `مفيش رد من ${endpoint} (HTTP ${response.status}) — الـ API غير متاح هنا`
     );
   }
-  if (trimmed.startsWith("<") || trimmed.startsWith("<!")) {
+
+  if (looksLikeHtml) {
     throw new Error(
-      "الطلب وصل لصفحة HTML مش API. تأكد إن السيرفر شغال بـ npm run dev وإنك فاتح http://localhost:5173"
+      `الطلب على ${endpoint} رجّع صفحة HTML بدل JSON (HTTP ${response.status}). الـ API غير متاح على الاستضافة الحالية — استخدم مفتاح المزوّد المباشر من الإعدادات.`
     );
   }
+
   try {
     return JSON.parse(trimmed);
   } catch {
     throw new Error(
       response.ok
-        ? `رد مش مفهوم من السيرفر: ${trimmed.slice(0, 80)}`
-        : trimmed.slice(0, 160) || `server error ${response.status}`
+        ? `رد مش مفهوم من ${endpoint}: ${trimmed.slice(0, 80)}`
+        : trimmed.slice(0, 160) || `${endpoint} error ${response.status}`
     );
   }
 }
@@ -386,8 +534,9 @@ const searchRequestIdRef = useRef(0);
   const [showSettings, setShowSettings] = useState(false);
   const [models, setModels] = useState([]);
   const [presets, setPresets] = useState([]);
-  const [keySlots, setKeySlots] = useState([]);
+  const [keySlots, setKeySlots] = useState(DEFAULT_KEY_SLOTS);
   const [keyDrafts, setKeyDrafts] = useState({});
+  const [sessionKeys, setSessionKeys] = useState(readSessionKeys);
   const [activeId, setActiveId] = useState("");
   const [modelsLoading, setModelsLoading] = useState(true);
   const [settingsBusy, setSettingsBusy] = useState(false);
@@ -458,20 +607,25 @@ const searchRequestIdRef = useRef(0);
       }
       if (keysRes.ok) {
         try {
-          const keysData = await readJsonResponse(keysRes);
-          setKeySlots(keysData.keys || []);
+          const keysData = await readJsonResponse(keysRes, "/api/keys");
+          setKeySlots(mergeKeySlots(keysData.keys || [], sessionKeys));
         } catch (e) {
           pushError("keys", e.message);
-          setKeySlots([]);
+          setKeySlots(mergeKeySlots([], sessionKeys));
         }
+      } else {
+        setKeySlots(mergeKeySlots([], sessionKeys));
       }
     } catch (e) {
       setSettingsError(e.message);
       pushError("models", e.message);
+      setKeySlots((slots) => mergeKeySlots(slots, sessionKeys));
+      setModels((prev) => (prev.length ? prev : FALLBACK_MODELS));
+      setActiveId((prev) => prev || FALLBACK_MODELS[0].id);
     } finally {
       setModelsLoading(false);
     }
-  }, [pushError]);
+  }, [pushError, sessionKeys]);
 
   useEffect(() => {
     refreshModels();
@@ -546,26 +700,58 @@ useEffect(() => {
   }, []);
 
   const callVision = useCallback(async (imageBase64, prompt) => {
+    const sessionKey = String(sessionKeys.OPENROUTER_API_KEY || "").trim();
+
+    if (activeModel?.provider === "openrouter" && sessionKey) {
+      return await callOpenRouterDirect({
+        apiKey: sessionKey,
+        modelId: activeModel.model,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: prompt },
+              {
+                type: "image_url",
+                image_url: { url: `data:image/jpeg;base64,${imageBase64}` },
+              },
+            ],
+          },
+        ],
+      });
+    }
+
     const response = await fetch("/api/vision", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ imageBase64, prompt }),
     });
-    const data = await readJsonResponse(response);
+    const data = await readJsonResponse(response, "/api/vision");
     if (!response.ok) throw new Error(data?.error || `vision HTTP ${response.status}`);
     return (data.text || "").trim();
-  }, []);
+  }, [activeModel, sessionKeys]);
 
   const callSearch = useCallback(async (prompt) => {
+    const sessionKey = String(sessionKeys.OPENROUTER_API_KEY || "").trim();
+
+    if (activeModel?.provider === "openrouter" && sessionKey) {
+      const text = await callOpenRouterDirect({
+        apiKey: sessionKey,
+        modelId: activeModel.model,
+        messages: [{ role: "user", content: prompt }],
+      });
+      return { text, model: activeModel.model };
+    }
+
     const response = await fetch("/api/anthropic-search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt }),
     });
-    const data = await readJsonResponse(response);
+    const data = await readJsonResponse(response, "/api/anthropic-search");
     if (!response.ok) throw new Error(data?.error || `search HTTP ${response.status}`);
     return { text: (data.text || "").trim(), model: data.model };
-  }, []);
+  }, [activeModel, sessionKeys]);
 
   const runAgentVision = useCallback(
     async (base64) => {
@@ -795,21 +981,32 @@ const first = captured[0];
     setSettingsBusy(true);
     setSettingsError("");
     setSettingsOk("");
+
+    // الأهم: المفتاح بيتحفظ في المتصفح فورًا حتى لو الـ /api مش موجود
+    const nextSessionKeys = { ...sessionKeys, ...payload };
+    setSessionKeys(nextSessionKeys);
+    writeSessionKeys(nextSessionKeys);
+    setKeySlots((slots) => mergeKeySlots(slots, nextSessionKeys));
+    setKeyDrafts({});
+    setSettingsOk("المفتاح اتحفظ في المتصفح (sessionStorage) وشغال على طول.");
+
     try {
       const res = await fetch("/api/keys", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = await readJsonResponse(res);
-      if (!res.ok) throw new Error(data?.error || "فشل حفظ المفاتيح");
-      setKeySlots(data.keys || []);
-      setKeyDrafts({});
-      setSettingsOk("المفاتيح اتحفظت في keys.json (مش بتترفع على Git).");
-      await refreshModels();
+      const data = await readJsonResponse(res, "/api/keys");
+      if (!res.ok) throw new Error(data?.error || `فشل حفظ المفاتيح (HTTP ${res.status})`);
+      setKeySlots(mergeKeySlots(data.keys || [], nextSessionKeys));
+      setSettingsOk("المفاتيح اتحفظت في المتصفح وفي keys.json.");
     } catch (e) {
-      setSettingsError(e.message);
-      pushError("keys-save", e.message);
+      // الـ API اختياري: بنكمل بالمفتاح اللي في المتصفح من غير ما نوقف الجلسة
+      pushError(
+        "keys-save",
+        "حفظ المفاتيح على السيرفر فشل — المفتاح شغال من المتصفح",
+        e.message
+      );
     } finally {
       setSettingsBusy(false);
     }
@@ -1173,7 +1370,7 @@ const first = captured[0];
 
       {showSettings && (
         <div className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-3">
-          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl w-full max-w-md p-4 space-y-4 max-h-[90vh] overflow-y-auto">
+          <div className="box-border w-full min-w-0 max-w-md max-h-[90dvh] overflow-x-hidden overflow-y-auto bg-neutral-900 border border-neutral-800 rounded-2xl p-4 pb-[max(1rem,env(safe-area-inset-bottom))] space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold">الإعدادات</h2>
               <button onClick={() => setShowSettings(false)} aria-label="إغلاق">
@@ -1204,12 +1401,12 @@ const first = captured[0];
                   </div>
                   <input
                     type="password"
-                    value={keyDrafts[slot.envKey] || ""}
+                    value={keyDrafts[slot.envKey] ?? sessionKeys[slot.envKey] ?? ""}
                     onChange={(e) =>
                       setKeyDrafts((d) => ({ ...d, [slot.envKey]: e.target.value }))
                     }
                     dir="ltr"
-                    className="w-full bg-neutral-800 rounded-lg px-3 py-2 text-sm outline-none"
+                    className="box-border block w-full min-w-0 max-w-full bg-neutral-800 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-500"
                     placeholder={slot.set ? "سيب فاضي أو الصق مفتاح جديد" : slot.envKey}
                   />
                   <p className="text-[10px] text-neutral-600">{slot.hint}</p>
@@ -1320,14 +1517,22 @@ const first = captured[0];
                     value={draft.provider}
                     onChange={(e) => {
                       const provider = e.target.value;
-                      const defaults = PROVIDER_DEFAULTS[provider] || PROVIDER_DEFAULTS.openrouter;
-                      setDraft((d) => ({
-                        ...d,
-                        provider,
-                        supportsVision: defaults.supportsVision,
-                        model: d.model || defaults.model,
-                        name: d.name || defaults.nameHint,
-                      }));
+                      const defaults =
+                        PROVIDER_DEFAULTS[provider] || PROVIDER_DEFAULTS.openrouter;
+                      setDraft((d) => {
+                        const prevDefaults =
+                          PROVIDER_DEFAULTS[d.provider] || PROVIDER_DEFAULTS.openrouter;
+                        // القيم المخصصة اللي المستخدم عدّلها بنفسه مش بتتغير مع تغيير المزوّد
+                        const keepModel = Boolean(d.model) && d.model !== prevDefaults.model;
+                        const keepName = Boolean(d.name) && d.name !== prevDefaults.nameHint;
+                        return {
+                          ...d,
+                          provider,
+                          supportsVision: defaults.supportsVision,
+                          model: keepModel ? d.model : defaults.model,
+                          name: keepName ? d.name : defaults.nameHint,
+                        };
+                      });
                     }}
                     className="w-full bg-neutral-800 rounded-lg px-3 py-2 text-sm outline-none"
                   >
@@ -1345,7 +1550,7 @@ const first = captured[0];
                     type="text"
                     value={draft.name}
                     onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-                    className="w-full bg-neutral-800 rounded-lg px-3 py-2 text-sm outline-none"
+                    className="box-border block w-full min-w-0 max-w-full bg-neutral-800 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-500"
                     placeholder={providerMeta.nameHint}
                   />
                 </div>
@@ -1357,7 +1562,7 @@ const first = captured[0];
                     value={draft.model}
                     onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
                     dir="ltr"
-                    className="w-full bg-neutral-800 rounded-lg px-3 py-2 text-sm outline-none"
+                    className="box-border block w-full min-w-0 max-w-full bg-neutral-800 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-500"
                     placeholder={providerMeta.modelPlaceholder}
                   />
                 </div>
