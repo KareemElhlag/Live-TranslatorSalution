@@ -887,6 +887,8 @@ const runSearch = useCallback(
       searchDelayRef.current = null;
     }
     searchRequestIdRef.current += 1;
+    searchingRef.current = false;
+    setSearching(false);
 
     const canvas = canvasRef.current;
     canvas.width = video.videoWidth;
