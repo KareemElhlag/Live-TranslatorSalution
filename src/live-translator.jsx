@@ -61,15 +61,17 @@ const EMPTY_DRAFT = {
 
 const MAX_ERROR_LOG = 40;
 
-const VISION_PROMPT = `You are a careful OCR + Arabic translator for a live camera.
-Read the single most prominent English or Russian question/text near the image center.
-If it is a multiple-choice question (اختر / choose / options like 1) 2) 3) or A) B) C)), include the question AND all visible options in "original".
-Return ONLY one line of valid complete JSON (no markdown, no extra text):
-{"found":true,"original":"<exact source text including options if any>","translation":"<short clear Arabic translation>"}
+const VISION_PROMPT = `You are a careful OCR extractor and Arabic translator for a live camera.
+Read the single most prominent English or Russian text near the image center.
+If it is a multiple-choice question, include the question and all visible options in "original".
+Return only one complete line of valid JSON, with no markdown or extra text:
+{"found":true,"original":"<exact source text including all visible options>","translation":"<short, clear Arabic translation>"}
 Rules:
-- translation: short Modern Standard Arabic only (one brief line), no English/mixed fragments.
+- The translation must be concise Modern Standard Arabic only.
+- Do not answer questions in the translation field.
+- Do not add greetings, fillers, explanations, or markdown.
 - Close all quotes and braces.
-If nothing readable: {"found":false}`;
+If nothing readable is present, return: {"found":false}`;
 
 function looksLikeQuestion(original, translatedArabic) {
   const src = (original || "").trim();
@@ -92,15 +94,106 @@ function looksLikeMultipleChoice(text) {
 }
 
 function buildAnswerPrompt(q, translationHint) {
-  const isMcq = looksLikeMultipleChoice(q) || looksLikeMultipleChoice(translationHint);
+  const isMcq =
+    looksLikeMultipleChoice(q) ||
+    looksLikeMultipleChoice(translationHint);
+
+  const context = translationHint
+    ? `\nArabic OCR/translation context:\n${translationHint}\n`
+    : "";
+
   if (isMcq) {
-    return `Camera captured this MULTIPLE-CHOICE question (اختر) with options:\n"${q}"\nReply in Arabic. FIRST give the correct option number or letter only (example: 2 or B or ج). Then optionally one very short Arabic half-line. Preferred format: "2 — ..." or just "2". Do not write a long explanation. Do not skip the option number/letter.`;
+    return `Answer this multiple-choice question in English.
+
+Question and visible choices:
+${q}
+${context}
+Rules:
+- Determine the correct answer using the visible choices.
+- The first line must be exactly: "Correct Answer: <exact option label>) <exact choice text>"
+- Put the correct answer first and add no introduction.
+- If useful, add one concise line beginning "Reason:".
+- Do not list the other options or use markdown.
+- If the available text is insufficient, say so plainly in English; do not guess.`;
   }
-  const isQ = looksLikeQuestion(q, translationHint);
-  if (isQ) {
-    return `Camera captured this question: "${q}". Reply in Arabic ONLY with a very short useful answer: maximum 1–2 short lines (or a few words if enough). No intro, no bullet points, no repetition of the question.`;
+
+  if (looksLikeQuestion(q, translationHint)) {
+    return `Answer this question in English:
+${q}
+${context}
+Rules:
+- Give the direct answer first without a greeting or repeated question.
+- If the answer requires multiple steps, use only numbered steps: 1., 2., 3., and so on.
+- Keep each step concise and readable on a mobile screen.
+- If no steps are needed, answer in one or two concise sentences.
+- Do not use markdown headings, bullets, or code fences.`;
   }
-  return `Camera captured this text: "${q}". Reply in Arabic ONLY with a very short useful summary/context: maximum 1–2 short lines. No intro, no filler, do not only restate the translation.`;
+
+  return `Translate or briefly summarize this captured text in concise English:
+${q}
+${context}
+Rules:
+- Return only the English translation or a very brief English summary.
+- Do not add greetings, filler, explanations, or repeated source text.
+- Do not use markdown, headings, bullets, or code fences.`;
+}
+
+function renderFormattedAnswer(answer) {
+  const text = String(answer || "").trim();
+  if (!text) return null;
+
+  const choiceMatch = text.match(
+    /^Correct Answer:\s*(.+?)(?:\r?\n|$)([\s\S]*)$/i
+  );
+
+  if (choiceMatch) {
+    const choice = choiceMatch[1].trim();
+    const explanation = choiceMatch[2]
+      .replace(/^\s*Reason:\s*/i, "")
+      .trim();
+
+    return (
+      <div dir="ltr" className="space-y-2 text-left">
+        <p className="rounded-lg border border-emerald-400/40 bg-emerald-500/15 px-3 py-2 text-base font-bold text-emerald-200">
+          Correct Answer: {choice}
+        </p>
+        {explanation && (
+          <p className="text-sm leading-relaxed text-emerald-100/90">
+            {explanation}
+          </p>
+        )}
+      </div>
+    );
+  }
+
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const steps = lines.map((line) => line.match(/^\d+\.\s+(.+)$/));
+
+  if (lines.length > 0 && steps.every(Boolean)) {
+    return (
+      <ol
+        dir="ltr"
+        className="list-decimal space-y-2 pl-6 text-left text-sm leading-relaxed text-emerald-100/95"
+      >
+        {steps.map((step, index) => (
+          <li key={`${index}-${step[1]}`}>{step[1]}</li>
+        ))}
+      </ol>
+    );
+  }
+
+  return (
+    <p
+      dir="ltr"
+      className="whitespace-pre-line text-left text-sm leading-relaxed text-emerald-100/95"
+    >
+      {text}
+    </p>
+  );
 }
 
 function normalizeCapture(parsed) {
@@ -274,7 +367,8 @@ export default function LiveTranslator() {
   const lastImageHashRef = useRef("");
   const lastRequestAtRef = useRef(0);
   const intervalMsRef = useRef(20000);
-
+  const searchDelayRef = useRef(null);
+  
   const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState(false);
   const [lines, setLines] = useState([]);
@@ -382,35 +476,66 @@ export default function LiveTranslator() {
     refreshModels();
   }, [refreshModels]);
 
-  const startCamera = useCallback(async () => {
-    try {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        pushError("camera", "المتصفح مش بيدعم الكاميرا — استخدم Chrome/Safari وHTTPS");
-        return;
-      }
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-      }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: false,
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
-    } catch (e) {
-      pushError("camera", "مقدرش أوصل للكاميرا", e.message);
+const startCamera = useCallback(async () => {
+  try {
+    if (
+      typeof window === "undefined" ||
+      !window.isSecureContext ||
+      !navigator.mediaDevices?.getUserMedia
+    ) {
+      const message =
+        "يتطلب تشغيل الكاميرا اتصالاً آمناً عبر HTTPS أو localhost.";
+      pushError("camera", message);
+      window.alert(message);
+      return;
     }
-  }, [facing, pushError]);
 
-  useEffect(() => {
-    startCamera();
-    return () => {
-      if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
-    };
-  }, [startCamera]);
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } },
+      audio: false,
+    });
+
+    streamRef.current = stream;
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+    }
+  } catch (error) {
+    let message = "تعذر تشغيل الكاميرا.";
+
+    if (error?.name === "NotAllowedError") {
+      message =
+        "تم رفض إذن الكاميرا. اسمح للمتصفح بالوصول إلى الكاميرا، ثم حاول مرة أخرى.";
+    } else if (error?.name === "NotFoundError") {
+      message = "لم يتم العثور على كاميرا متاحة على هذا الجهاز.";
+    } else if (error?.name === "NotReadableError") {
+      message = "تعذر الوصول إلى الكاميرا. قد تكون مستخدمة من تطبيق آخر.";
+    }
+
+    pushError("camera", message, error?.message || error?.name || "");
+    window.alert(message);
+  }
+}, [pushError]);
+
+ useEffect(() => {
+  return () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    if (searchDelayRef.current) {
+      clearTimeout(searchDelayRef.current);
+      searchDelayRef.current = null;
+    }
+  };
+}, []);
 
   const callVision = useCallback(async (imageBase64, prompt) => {
     const response = await fetch("/api/vision", {
@@ -461,6 +586,10 @@ export default function LiveTranslator() {
   const runSearch = useCallback(
     async (textToSearch, translationHint = "", { force = false } = {}) => {
       const q = (textToSearch || "").trim();
+      if (searchDelayRef.current) {
+  clearTimeout(searchDelayRef.current);
+  searchDelayRef.current = null;
+}
       if (!q || searchingRef.current) return;
       if (!force && q === lastSearchKeyRef.current) return;
 
@@ -549,7 +678,15 @@ export default function LiveTranslator() {
       lastSearchKeyRef.current = "";
 
       const first = captured[0];
-      runSearch(first.original, first.translation);
+
+if (searchDelayRef.current) {
+  clearTimeout(searchDelayRef.current);
+}
+
+searchDelayRef.current = setTimeout(() => {
+  searchDelayRef.current = null;
+  runSearch(first.original, first.translation);
+}, 6000);
     } catch (e) {
       pushError("agent", e.message || "فشل مسار الترجمة");
     } finally {
@@ -771,14 +908,14 @@ export default function LiveTranslator() {
       </header>
 
       <div className="relative flex-1 bg-black overflow-hidden">
-        <video
-          ref={videoRef}
-          playsInline
-          muted
-          autoPlay
-          className="w-full h-full object-cover"
-          style={{ transform: facing === "user" ? "scaleX(-1)" : "none" }}
-        />
+       <video
+  ref={videoRef}
+  playsInline
+  muted
+  autoPlay
+  className="w-full h-full object-cover"
+  style={{ transform: facing === "user" ? "scaleX(-1)" : "none" }}
+/>
         <canvas ref={canvasRef} className="hidden" />
 
         {busy && (
@@ -812,6 +949,12 @@ export default function LiveTranslator() {
               {primaryLine.translation && (
                 <div className={wideBox ? "min-w-[30%] flex-1" : undefined}>
                   <p className="text-base sm:text-lg leading-snug font-semibold text-amber-300 drop-shadow">
+                    {primaryLine.translation && (
+                <div className={wideBox ? "min-w-[30%] flex-1" : undefined}>
+                  <p
+                    dir="rtl"
+                    className="text-right whitespace-pre-line text-base sm:text-lg leading-snug font-semibold text-amber-300 drop-shadow"
+                  >
                     {primaryLine.translation}
                   </p>
                 </div>
@@ -829,10 +972,10 @@ export default function LiveTranslator() {
                     <Loader2 size={11} className="animate-spin" />
                     جاري الإجابة تلقائيًا...
                   </p>
-                ) : searchInfo ? (
-                  <p className="text-sm text-emerald-100/95 leading-relaxed whitespace-pre-line font-medium">
-                    {searchInfo}
-                  </p>
+                 ) : searchInfo ? (
+                  <div className="text-left">
+                    {renderFormattedAnswer(searchInfo)}
+                  </div>
                 ) : searchError ? (
                   <p className="text-xs text-red-200">{searchError}</p>
                 ) : (
@@ -873,15 +1016,25 @@ export default function LiveTranslator() {
           </div>
         )}
 
-        <div className="flex items-center gap-3 pt-1">
-          <button
-            onClick={toggleRunning}
-            className="flex-1 flex items-center justify-center gap-2 bg-amber-600 hover:bg-amber-500 transition-colors text-white font-medium py-3 rounded-xl"
-          >
-            {running ? <Pause size={18} /> : <Camera size={18} />}
-            {running ? "إيقاف" : "ابدأ الترجمة اللايف"}
-          </button>
-        </div>
+       <div className="flex items-center gap-3 pt-1">
+  <button
+    type="button"
+    onClick={startCamera}
+    className="flex-1 flex items-center justify-center gap-2 bg-sky-600 hover:bg-sky-500 transition-colors text-white font-medium py-3 rounded-xl"
+  >
+    <Camera size={18} />
+    تشغيل الكاميرا
+  </button>
+
+  <button
+    type="button"
+    onClick={toggleRunning}
+    className="flex-1 flex items-center justify-center gap-2 bg-amber-600 hover:bg-amber-500 transition-colors text-white font-medium py-3 rounded-xl"
+  >
+    {running ? <Pause size={18} /> : <Camera size={18} />}
+    {running ? "إيقاف" : "ابدأ الترجمة اللايف"}
+  </button>
+</div>
 
         <div className="flex items-center justify-center gap-2 text-xs text-neutral-500 flex-wrap">
           <span>سرعة الالتقاط:</span>
