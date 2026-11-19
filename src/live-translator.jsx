@@ -63,6 +63,29 @@ const MAX_ERROR_LOG = 40;
 
 const SESSION_KEYS_STORAGE_KEY = "live-translator-session-keys";
 
+const SESSION_MODELS_STORAGE_KEY = "live-translator-session-models";
+
+function readSessionModelStore() {
+  try {
+    const value = JSON.parse(
+      window.sessionStorage.getItem(SESSION_MODELS_STORAGE_KEY) || "{}"
+    );
+    return {
+      models: Array.isArray(value.models) ? value.models : [],
+      activeId: typeof value.activeId === "string" ? value.activeId : "",
+    };
+  } catch {
+    return { models: [], activeId: "" };
+  }
+}
+
+function writeSessionModelStore(store) {
+  window.sessionStorage.setItem(
+    SESSION_MODELS_STORAGE_KEY,
+    JSON.stringify(store)
+  );
+}
+
 const DEFAULT_KEY_SLOTS = [
   {
     envKey: "OPENROUTER_API_KEY",
@@ -537,12 +560,14 @@ export default function LiveTranslator() {
   const [wideBox, setWideBox] = useState(false);
 
   const [showSettings, setShowSettings] = useState(false);
-  const [models, setModels] = useState([]);
+  const [models, setModels] = useState(() => readSessionModelStore().models);
   const [presets, setPresets] = useState([]);
   const [keySlots, setKeySlots] = useState(DEFAULT_KEY_SLOTS);
   const [keyDrafts, setKeyDrafts] = useState({});
   const [sessionKeys, setSessionKeys] = useState(readSessionKeys);
-  const [activeId, setActiveId] = useState("");
+  const [activeId, setActiveId] = useState(
+    () => readSessionModelStore().activeId
+  );
   const [modelsLoading, setModelsLoading] = useState(true);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsError, setSettingsError] = useState("");
@@ -604,12 +629,14 @@ export default function LiveTranslator() {
         setModels(Array.isArray(data.models) ? data.models : []);
         setActiveId(data.activeId || data.models?.[0]?.id || "");
       } else {
-        setModels([]);
-        setActiveId("");
+        const localStore = readSessionModelStore();
+        setModels(localStore.models);
+        setActiveId(localStore.activeId || localStore.models[0]?.id || "");
       }
     } catch (e) {
-      setModels([]);
-      setActiveId("");
+      const localStore = readSessionModelStore();
+      setModels(localStore.models);
+      setActiveId(localStore.activeId || localStore.models[0]?.id || "");
       pushError("models", e.message);
     }
 
@@ -740,6 +767,12 @@ useEffect(() => {
       });
     }
 
+    if (sessionKey && activeModel?.provider !== "openrouter") {
+      throw new Error(
+        `الموديل المحدد (${activeModel?.provider || "غير محدد"}) ليس OpenRouter؛ لن يتم إرسال المفتاح إلى /api/vision. اختر موديل OpenRouter أو أضف backend API.`
+      );
+    }
+
     const response = await fetch("/api/vision", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -760,6 +793,12 @@ useEffect(() => {
         messages: [{ role: "user", content: prompt }],
       });
       return { text, model: activeModel.model };
+    }
+
+    if (sessionKey && activeModel?.provider !== "openrouter") {
+      throw new Error(
+        `الموديل المحدد (${activeModel?.provider || "غير محدد"}) ليس OpenRouter؛ لن يتم إرسال المفتاح إلى /api/anthropic-search. اختر موديل OpenRouter أو أضف backend API.`
+      );
     }
 
     const response = await fetch("/api/anthropic-search", {
@@ -1071,6 +1110,26 @@ const runSearch = useCallback(
   };
 
   const selectModel = async (id) => {
+    // الموديلات المضافة في المتصفح بتتفعّل محليًا من غير ما تلمس /api
+    const localStore = readSessionModelStore();
+    const localModel = localStore.models.find((model) => model.id === id);
+
+    if (localModel) {
+      const nextStore = { ...localStore, activeId: id };
+      try {
+        writeSessionModelStore(nextStore);
+        setModels(localStore.models);
+        setActiveId(id);
+        setSettingsError("");
+        return;
+      } catch (error) {
+        setSettingsError(
+          `تعذر حفظ اختيار الموديل في sessionStorage: ${error.message}`
+        );
+        return;
+      }
+    }
+
     setSettingsBusy(true);
     setSettingsError("");
     try {
@@ -1142,6 +1201,42 @@ const runSearch = useCallback(
       setDraft(EMPTY_DRAFT);
       setSettingsOk("الموديل اتحفظ في models.json (من غير مفاتيح).");
     } catch (e) {
+      // استضافة static: نحفظ موديل OpenRouter في جلسة المتصفح بدل ما نفشل
+      if (
+        draft.provider === "openrouter" &&
+        String(sessionKeys.OPENROUTER_API_KEY || "").trim()
+      ) {
+        const model = {
+          id:
+            draft.id ||
+            `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name: draft.name.trim() || draft.model.trim(),
+          provider: "openrouter",
+          model: draft.model.trim(),
+          supportsVision: Boolean(draft.supportsVision),
+          hasApiKey: true,
+        };
+
+        const nextModels = [
+          ...models.filter((item) => item.id !== model.id),
+          model,
+        ];
+        const nextStore = { models: nextModels, activeId: model.id };
+
+        try {
+          writeSessionModelStore(nextStore);
+          setModels(nextModels);
+          setActiveId(model.id);
+          setEditing(false);
+          setDraft(EMPTY_DRAFT);
+          setSettingsError("");
+          setSettingsOk("تم حفظ الموديل في جلسة هذا المتصفح.");
+          return;
+        } catch (storageError) {
+          pushError("model-session-storage", storageError.message);
+        }
+      }
+
       setSettingsError(e.message);
       pushError("model-save", e.message);
     } finally {
