@@ -476,52 +476,56 @@ export default function LiveTranslator() {
     refreshModels();
   }, [refreshModels]);
 
-const startCamera = useCallback(async () => {
-  try {
-    if (
-      typeof window === "undefined" ||
-      !window.isSecureContext ||
-      !navigator.mediaDevices?.getUserMedia
-    ) {
-      const message =
-        "يتطلب تشغيل الكاميرا اتصالاً آمناً عبر HTTPS أو localhost.";
-      pushError("camera", message);
+const startCamera = useCallback(async (preferredFacing = facing) => {
+    try {
+      if (
+        typeof window === "undefined" ||
+        !window.isSecureContext ||
+        !navigator.mediaDevices?.getUserMedia
+      ) {
+        const message =
+          "يتطلب تشغيل الكاميرا اتصالاً آمناً عبر HTTPS أو localhost.";
+        pushError("camera", message);
+        window.alert(message);
+        return;
+      }
+
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: {
+            ideal: preferredFacing,
+          },
+        },
+        audio: false,
+      });
+
+      streamRef.current = stream;
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+    } catch (error) {
+      let message = "تعذر تشغيل الكاميرا.";
+
+      if (error?.name === "NotAllowedError") {
+        message =
+          "تم رفض إذن الكاميرا. اسمح للمتصفح بالوصول إلى الكاميرا، ثم حاول مرة أخرى.";
+      } else if (error?.name === "NotFoundError") {
+        message = "لم يتم العثور على كاميرا متاحة على هذا الجهاز.";
+      } else if (error?.name === "NotReadableError") {
+        message = "تعذر الوصول إلى الكاميرا. قد تكون مستخدمة من تطبيق آخر.";
+      }
+
+      pushError("camera", message, error?.message || error?.name || "");
       window.alert(message);
-      return;
     }
-
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" } },
-      audio: false,
-    });
-
-    streamRef.current = stream;
-
-    if (videoRef.current) {
-      videoRef.current.srcObject = stream;
-      await videoRef.current.play();
-    }
-  } catch (error) {
-    let message = "تعذر تشغيل الكاميرا.";
-
-    if (error?.name === "NotAllowedError") {
-      message =
-        "تم رفض إذن الكاميرا. اسمح للمتصفح بالوصول إلى الكاميرا، ثم حاول مرة أخرى.";
-    } else if (error?.name === "NotFoundError") {
-      message = "لم يتم العثور على كاميرا متاحة على هذا الجهاز.";
-    } else if (error?.name === "NotReadableError") {
-      message = "تعذر الوصول إلى الكاميرا. قد تكون مستخدمة من تطبيق آخر.";
-    }
-
-    pushError("camera", message, error?.message || error?.name || "");
-    window.alert(message);
-  }
-}, [pushError]);
+  }, [facing, pushError]);
 
  useEffect(() => {
   return () => {
@@ -695,8 +699,13 @@ searchDelayRef.current = setTimeout(() => {
     }
   }, [activeModel, runAgentVision, runSearch, pushError]);
 
-  useEffect(() => {
+ useEffect(() => {
     if (!running) {
+      if (searchDelayRef.current) {
+        clearTimeout(searchDelayRef.current);
+        searchDelayRef.current = null;
+      }
+
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
         intervalRef.current = null;
@@ -715,9 +724,13 @@ searchDelayRef.current = setTimeout(() => {
 
   const toggleRunning = () => setRunning((r) => !r);
 
-  const flipCamera = () => {
+ const flipCamera = async () => {
     lastImageHashRef.current = "";
-    setFacing((f) => (f === "environment" ? "user" : "environment"));
+    const nextFacing =
+      facing === "environment" ? "user" : "environment";
+
+    setFacing(nextFacing);
+    await startCamera(nextFacing);
   };
 
   const forceRecapture = () => {
@@ -1017,14 +1030,14 @@ searchDelayRef.current = setTimeout(() => {
         )}
 
        <div className="flex items-center gap-3 pt-1">
-  <button
-    type="button"
-    onClick={startCamera}
-    className="flex-1 flex items-center justify-center gap-2 bg-sky-600 hover:bg-sky-500 transition-colors text-white font-medium py-3 rounded-xl"
-  >
-    <Camera size={18} />
-    تشغيل الكاميرا
-  </button>
+ <button
+            type="button"
+            onClick={() => startCamera("environment")}
+            className="flex-1 flex items-center justify-center gap-2 bg-sky-600 hover:bg-sky-500 transition-colors text-white font-medium py-3 rounded-xl"
+          >
+            <Camera size={18} />
+            تشغيل الكاميرا
+          </button>
 
   <button
     type="button"
