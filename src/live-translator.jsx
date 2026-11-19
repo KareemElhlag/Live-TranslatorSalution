@@ -128,14 +128,19 @@ function readSessionKeys() {
 }
 
 function writeSessionKeys(keys) {
+  if (typeof window === "undefined" || !window.sessionStorage) {
+    throw new Error(
+      "sessionStorage مش متاح في المتصفح — المفتاح مش هيتحفظ بعد إغلاق التاب."
+    );
+  }
+
   try {
-    if (typeof window === "undefined" || !window.sessionStorage) return;
     window.sessionStorage.setItem(
       SESSION_KEYS_STORAGE_KEY,
       JSON.stringify(keys || {})
     );
-  } catch {
-    // المتصفح ممكن يمنع الستوريدج — المفتاح بيفضل في الميموري لحد ما الصفحة تتقفل
+  } catch (e) {
+    throw new Error(`فشل حفظ المفتاح في sessionStorage: ${e?.message || e}`);
   }
 }
 
@@ -942,8 +947,11 @@ const runSearch = useCallback(
 
   useEffect(() => {
     if (!running) {
-      // إيقاف صريح من المستخدم: منع أي إجابة مجدولة من إطار قديم
+      // إيقاف صريح من المستخدم: منع أي إجابة مجدولة أو جارية من إطار قديم
       captureSeqRef.current += 1;
+      searchRequestIdRef.current += 1;
+      searchingRef.current = false;
+      setSearching(false);
 
       if (searchDelayRef.current) {
         clearTimeout(searchDelayRef.current);
@@ -1011,10 +1019,25 @@ const runSearch = useCallback(
     // الأهم: المفتاح بيتحفظ في المتصفح فورًا حتى لو الـ /api مش موجود
     const nextSessionKeys = { ...sessionKeys, ...payload };
     setSessionKeys(nextSessionKeys);
-    writeSessionKeys(nextSessionKeys);
     setKeySlots((slots) => mergeKeySlots(slots, nextSessionKeys));
     setKeyDrafts({});
-    setSettingsOk("المفتاح اتحفظ في المتصفح (sessionStorage) وشغال على طول.");
+
+    let persistedForTab = false;
+    try {
+      writeSessionKeys(nextSessionKeys);
+      persistedForTab = true;
+    } catch (e) {
+      pushError("keys-storage", e.message);
+    }
+
+    if (persistedForTab) {
+      setSettingsOk("المفتاح اتحفظ في المتصفح (sessionStorage) وشغال على طول.");
+    } else {
+      setSettingsError(
+        "المفتاح شغال في الصفحة الحالية بس — المتصفح منع التخزين، فلو عملت Refresh هتحتاج تلصقه تاني."
+      );
+      setSettingsOk("");
+    }
 
     try {
       const res = await fetch("/api/keys", {
@@ -1025,7 +1048,11 @@ const runSearch = useCallback(
       const data = await readJsonResponse(res, "/api/keys");
       if (!res.ok) throw new Error(data?.error || `فشل حفظ المفاتيح (HTTP ${res.status})`);
       setKeySlots(mergeKeySlots(data.keys || [], nextSessionKeys));
-      setSettingsOk("المفاتيح اتحفظت في المتصفح وفي keys.json.");
+      setSettingsOk(
+        persistedForTab
+          ? "المفاتيح اتحفظت في المتصفح وفي keys.json."
+          : "المفاتيح اتحفظت في keys.json (المتصفح منع التخزين المحلي)."
+      );
     } catch (e) {
       // الـ API اختياري: بنكمل بالمفتاح اللي في المتصفح من غير ما نوقف الجلسة
       pushError(
