@@ -722,7 +722,7 @@ const first = captured[0];
       searchDelayRef.current = setTimeout(() => {
         searchDelayRef.current = null;
         runSearch(first.original, first.translation, { force: true });
-      }, 6000);;
+      }, 6000);
     } catch (e) {
       pushError("agent", e.message || "فشل مسار الترجمة");
     } finally {
