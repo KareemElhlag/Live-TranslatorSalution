@@ -106,17 +106,15 @@ const DEFAULT_KEY_SLOTS = [
   },
 ];
 
-/** موديلات احتياطية لما الـ /api مش موجود (استضافة static) */
-const FALLBACK_MODELS = [
-  {
-    id: "openrouter-default",
-    name: "OpenRouter · اختياري",
-    provider: "openrouter",
-    model: "google/gemini-3.6-flash",
-    supportsVision: true,
-    hasApiKey: false,
-  },
-];
+/** موديل OpenRouter الاحتياطي لما الـ /api/models مش موجود (استضافة static) */
+const SESSION_OPENROUTER_MODEL = {
+  id: "session-openrouter",
+  name: "OpenRouter · من المتصفح",
+  provider: "openrouter",
+  model: "google/gemini-3.6-flash",
+  supportsVision: true,
+  hasApiKey: false,
+};
 
 function readSessionKeys() {
   try {
@@ -516,8 +514,10 @@ export default function LiveTranslator() {
   const lastRequestAtRef = useRef(0);
   const intervalMsRef = useRef(20000);
   const searchDelayRef = useRef(null);
-const searchRequestIdRef = useRef(0);
-  
+  const searchRequestIdRef = useRef(0);
+  const captureSeqRef = useRef(0);
+  const runningRef = useRef(false);
+
   const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState(false);
   const [lines, setLines] = useState([]);
@@ -545,7 +545,12 @@ const searchRequestIdRef = useRef(0);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(EMPTY_DRAFT);
 
-  const activeModel = models.find((m) => m.id === activeId) || models[0] || null;
+  const activeModel =
+    models.find((m) => m.id === activeId) ||
+    models[0] ||
+    (String(sessionKeys.OPENROUTER_API_KEY || "").trim()
+      ? SESSION_OPENROUTER_MODEL
+      : null);
   const primaryLine = lines[0] || null;
 
   useEffect(() => {
@@ -585,43 +590,51 @@ const searchRequestIdRef = useRef(0);
   const refreshModels = useCallback(async () => {
     setModelsLoading(true);
     setSettingsError("");
-    try {
-      const [modelsRes, presetsRes, keysRes] = await Promise.all([
-        fetch("/api/models"),
-        fetch("/api/models/presets"),
-        fetch("/api/keys"),
-      ]);
-      const data = await readJsonResponse(modelsRes);
-      if (!modelsRes.ok) throw new Error(data?.error || "فشل تحميل الموديلات");
-      setModels(data.models || []);
-      setActiveId(data.activeId || data.models?.[0]?.id || "");
 
-      if (presetsRes.ok) {
-        try {
-          const presetData = await readJsonResponse(presetsRes);
-          setPresets(presetData.presets || []);
-        } catch (e) {
-          pushError("presets", e.message);
-          setPresets([]);
-        }
+    // كل مسار لوحده: فشل /api/models مش بيمنع المفاتيح ولا الموديل الاحتياطي
+    try {
+      const modelsRes = await fetch("/api/models");
+      if (modelsRes.ok) {
+        const data = await readJsonResponse(modelsRes, "/api/models");
+        setModels(Array.isArray(data.models) ? data.models : []);
+        setActiveId(data.activeId || data.models?.[0]?.id || "");
+      } else {
+        setModels([]);
+        setActiveId("");
       }
+    } catch (e) {
+      setModels([]);
+      setActiveId("");
+      pushError("models", e.message);
+    }
+
+    try {
+      const presetsRes = await fetch("/api/models/presets");
+      if (presetsRes.ok) {
+        const presetData = await readJsonResponse(
+          presetsRes,
+          "/api/models/presets"
+        );
+        setPresets(presetData.presets || []);
+      } else {
+        setPresets([]);
+      }
+    } catch (e) {
+      pushError("presets", e.message);
+      setPresets([]);
+    }
+
+    try {
+      const keysRes = await fetch("/api/keys");
       if (keysRes.ok) {
-        try {
-          const keysData = await readJsonResponse(keysRes, "/api/keys");
-          setKeySlots(mergeKeySlots(keysData.keys || [], sessionKeys));
-        } catch (e) {
-          pushError("keys", e.message);
-          setKeySlots(mergeKeySlots([], sessionKeys));
-        }
+        const keysData = await readJsonResponse(keysRes, "/api/keys");
+        setKeySlots(mergeKeySlots(keysData.keys || [], sessionKeys));
       } else {
         setKeySlots(mergeKeySlots([], sessionKeys));
       }
     } catch (e) {
-      setSettingsError(e.message);
-      pushError("models", e.message);
-      setKeySlots((slots) => mergeKeySlots(slots, sessionKeys));
-      setModels((prev) => (prev.length ? prev : FALLBACK_MODELS));
-      setActiveId((prev) => prev || FALLBACK_MODELS[0].id);
+      pushError("keys", e.message);
+      setKeySlots(mergeKeySlots([], sessionKeys));
     } finally {
       setModelsLoading(false);
     }
@@ -694,6 +707,7 @@ useEffect(() => {
         searchDelayRef.current = null;
       }
 
+      captureSeqRef.current += 1;
       searchRequestIdRef.current += 1;
       searchingRef.current = false;
     };
@@ -893,20 +907,25 @@ const runSearch = useCallback(
 
       setLines(captured);
       searchRequestIdRef.current += 1;
-searchingRef.current = false;
-setSearching(false);
+      searchingRef.current = false;
+      setSearching(false);
       setSearchInfo("");
       setSearchError("");
       lastSearchKeyRef.current = "";
 
-const first = captured[0];
+      const first = captured[0];
+      const captureSeq = ++captureSeqRef.current;
 
       if (searchDelayRef.current) {
         clearTimeout(searchDelayRef.current);
+        searchDelayRef.current = null;
       }
 
+      // مهلة 6 ثواني قبل جلب الإجابة — أي التقاط أحدث أو إيقاف بيلغيها
       searchDelayRef.current = setTimeout(() => {
         searchDelayRef.current = null;
+        if (captureSeq !== captureSeqRef.current) return;
+        if (!runningRef.current) return;
         runSearch(first.original, first.translation, { force: true });
       }, 6000);
     } catch (e) {
@@ -917,8 +936,15 @@ const first = captured[0];
     }
   }, [activeModel, runAgentVision, runSearch, pushError]);
 
- useEffect(() => {
+  useEffect(() => {
+    runningRef.current = running;
+  }, [running]);
+
+  useEffect(() => {
     if (!running) {
+      // إيقاف صريح من المستخدم: منع أي إجابة مجدولة من إطار قديم
+      captureSeqRef.current += 1;
+
       if (searchDelayRef.current) {
         clearTimeout(searchDelayRef.current);
         searchDelayRef.current = null;
