@@ -368,6 +368,7 @@ export default function LiveTranslator() {
   const lastRequestAtRef = useRef(0);
   const intervalMsRef = useRef(20000);
   const searchDelayRef = useRef(null);
+const searchRequestIdRef = useRef(0);
   
   const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -677,6 +678,9 @@ const startCamera = useCallback(async (preferredFacing = facing) => {
       if (frameHash) lastImageHashRef.current = frameHash;
 
       setLines(captured);
+      searchRequestIdRef.current += 1;
+searchingRef.current = false;
+setSearching(false);
       setSearchInfo("");
       setSearchError("");
       lastSearchKeyRef.current = "";
