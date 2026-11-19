@@ -959,10 +959,7 @@ searchDelayRef.current = setTimeout(() => {
                   : "bg-black/18 px-3.5 py-3 max-w-xl mx-auto space-y-1.5"
               }`}
             >
-              {primaryLine.translation && (
-                <div className={wideBox ? "min-w-[30%] flex-1" : undefined}>
-                  <p className="text-base sm:text-lg leading-snug font-semibold text-amber-300 drop-shadow">
-                    {primaryLine.translation && (
+                           {primaryLine.translation && (
                 <div className={wideBox ? "min-w-[30%] flex-1" : undefined}>
                   <p
                     dir="rtl"
