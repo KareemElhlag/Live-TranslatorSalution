@@ -527,20 +527,23 @@ const startCamera = useCallback(async (preferredFacing = facing) => {
       window.alert(message);
     }
   }, [facing, pushError]);
+  
+useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
 
- useEffect(() => {
-  return () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
+      if (searchDelayRef.current) {
+        clearTimeout(searchDelayRef.current);
+        searchDelayRef.current = null;
+      }
 
-    if (searchDelayRef.current) {
-      clearTimeout(searchDelayRef.current);
-      searchDelayRef.current = null;
-    }
-  };
-}, []);
+      searchRequestIdRef.current += 1;
+      searchingRef.current = false;
+    };
+  }, []);
 
   const callVision = useCallback(async (imageBase64, prompt) => {
     const response = await fetch("/api/vision", {
@@ -588,36 +591,61 @@ const startCamera = useCallback(async (preferredFacing = facing) => {
     [callVision, pushError]
   );
 
-  const runSearch = useCallback(
-    async (textToSearch, translationHint = "", { force = false } = {}) => {
+const runSearch = useCallback(
+    async (textToSearch, translationHint = "", { force = false, delayMs = 0 } = {}) => {
       const q = (textToSearch || "").trim();
+      if (!q) return;
+
       if (searchDelayRef.current) {
-  clearTimeout(searchDelayRef.current);
-  searchDelayRef.current = null;
-}
-      if (!q || searchingRef.current) return;
+        clearTimeout(searchDelayRef.current);
+        searchDelayRef.current = null;
+      }
+
+      if (delayMs > 0) {
+        const requestId = ++searchRequestIdRef.current;
+
+        searchDelayRef.current = setTimeout(async () => {
+          searchDelayRef.current = null;
+
+          if (requestId !== searchRequestIdRef.current) return;
+          await runSearch(q, translationHint, { force, delayMs: 0 });
+        }, delayMs);
+
+        return;
+      }
+
       if (!force && q === lastSearchKeyRef.current) return;
 
+      const requestId = ++searchRequestIdRef.current;
       searchingRef.current = true;
       lastSearchKeyRef.current = q;
       setSearching(true);
       setSearchError("");
       setSearchInfo("");
+
       try {
         const prompt = buildAnswerPrompt(q, translationHint);
         const { text } = await callSearch(prompt);
-        if (text) setSearchInfo(text);
-        else {
+
+        if (requestId !== searchRequestIdRef.current) return;
+
+        if (text) {
+          setSearchInfo(text);
+        } else {
           setSearchError("مقدرش ألاقي إجابة دلوقتي.");
           pushError("answer", "رد الإجابة فاضي", q);
         }
       } catch (e) {
+        if (requestId !== searchRequestIdRef.current) return;
+
         const msg = e.message || "حصل خطأ أثناء جلب الإجابة.";
         setSearchError(msg);
         pushError("answer", msg, q);
       } finally {
-        searchingRef.current = false;
-        setSearching(false);
+        if (requestId === searchRequestIdRef.current) {
+          searchingRef.current = false;
+          setSearching(false);
+        }
       }
     },
     [callSearch, pushError]
@@ -685,16 +713,16 @@ setSearching(false);
       setSearchError("");
       lastSearchKeyRef.current = "";
 
-      const first = captured[0];
+const first = captured[0];
 
-if (searchDelayRef.current) {
-  clearTimeout(searchDelayRef.current);
-}
+      if (searchDelayRef.current) {
+        clearTimeout(searchDelayRef.current);
+      }
 
-searchDelayRef.current = setTimeout(() => {
-  searchDelayRef.current = null;
-  runSearch(first.original, first.translation);
-}, 6000);
+      searchDelayRef.current = setTimeout(() => {
+        searchDelayRef.current = null;
+        runSearch(first.original, first.translation, { force: true });
+      }, 6000);;
     } catch (e) {
       pushError("agent", e.message || "فشل مسار الترجمة");
     } finally {
