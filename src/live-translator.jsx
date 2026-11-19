@@ -880,6 +880,14 @@ const runSearch = useCallback(
       return;
     }
 
+    // 0) أي التقاط جديد بيلغي أي إجابة مجدولة أو جارية من التقاط أقدم
+    const requestCaptureSeq = ++captureSeqRef.current;
+    if (searchDelayRef.current) {
+      clearTimeout(searchDelayRef.current);
+      searchDelayRef.current = null;
+    }
+    searchRequestIdRef.current += 1;
+
     const canvas = canvasRef.current;
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
@@ -893,6 +901,7 @@ const runSearch = useCallback(
     setBusy(true);
     try {
       const captured = await runAgentVision(base64);
+      if (requestCaptureSeq !== captureSeqRef.current) return;
       if (!captured.length) {
         // حتى لو مفيش نص، ثبّت بصمة الإطار عشان منعيدش على نفس الفاضي
         if (frameHash) lastImageHashRef.current = frameHash;
@@ -919,17 +928,11 @@ const runSearch = useCallback(
       lastSearchKeyRef.current = "";
 
       const first = captured[0];
-      const captureSeq = ++captureSeqRef.current;
-
-      if (searchDelayRef.current) {
-        clearTimeout(searchDelayRef.current);
-        searchDelayRef.current = null;
-      }
 
       // مهلة 6 ثواني قبل جلب الإجابة — أي التقاط أحدث أو إيقاف بيلغيها
       searchDelayRef.current = setTimeout(() => {
         searchDelayRef.current = null;
-        if (captureSeq !== captureSeqRef.current) return;
+        if (requestCaptureSeq !== captureSeqRef.current) return;
         if (!runningRef.current) return;
         runSearch(first.original, first.translation, { force: true });
       }, 6000);
