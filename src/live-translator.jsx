@@ -561,6 +561,7 @@ export default function LiveTranslator() {
   const [captureFlash, setCaptureFlash] = useState(false);
   const [captureStatus, setCaptureStatus] = useState("");
   const [wideBox, setWideBox] = useState(false);
+  const [viewRotation, setViewRotation] = useState(0);
 
   const [showSettings, setShowSettings] = useState(false);
   const [models, setModels] = useState(() => readSessionModelStore().models);
@@ -585,6 +586,26 @@ export default function LiveTranslator() {
       ? SESSION_OPENROUTER_MODEL
       : null);
   const primaryLine = lines[0] || null;
+  const appRotationStyle =
+    viewRotation === 90 || viewRotation === 270
+      ? {
+          position: "fixed",
+          top: "calc((100dvh - 100dvw) / 2)",
+          left: "calc((100dvw - 100dvh) / 2)",
+          width: "100dvh",
+          height: "100dvw",
+          minHeight: 0,
+          overflowY: "auto",
+          transform: `rotate(${viewRotation}deg)`,
+          transformOrigin: "center",
+        }
+      : viewRotation === 180
+        ? {
+            minHeight: "100dvh",
+            transform: "rotate(180deg)",
+            transformOrigin: "center",
+          }
+        : undefined;
 
   useEffect(() => {
     intervalMsRef.current = interval_;
@@ -895,16 +916,26 @@ const runSearch = useCallback(
       setSearchError("");
       setSearchInfo("");
 
+      let timeoutId;
+
       try {
         const prompt = buildAnswerPrompt(q, translationHint);
-        const { text } = await callSearch(prompt);
+        const result = await Promise.race([
+          callSearch(prompt),
+          new Promise((_, reject) => {
+            timeoutId = setTimeout(
+              () => reject(new Error("انتهت مهلة طلب الإجابة. حاول مرة أخرى.")),
+              30000
+            );
+          }),
+        ]);
 
         if (requestId !== searchRequestIdRef.current) return;
 
-        if (text) {
-          setSearchInfo(text);
+        if (result.text) {
+          setSearchInfo(result.text);
         } else {
-          setSearchError("مقدرش ألاقي إجابة دلوقتي.");
+          setSearchError("لم تصل إجابة. حاول مرة أخرى.");
           pushError("answer", "رد الإجابة فاضي", q);
         }
       } catch (e) {
@@ -914,6 +945,7 @@ const runSearch = useCallback(
         setSearchError(msg);
         pushError("answer", msg, q);
       } finally {
+        clearTimeout(timeoutId);
         if (requestId === searchRequestIdRef.current) {
           searchingRef.current = false;
           setSearching(false);
@@ -1318,11 +1350,27 @@ const runSearch = useCallback(
   const providerMeta = PROVIDER_DEFAULTS[draft.provider] || PROVIDER_DEFAULTS.openrouter;
 
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col" dir="rtl">
+    <div
+      className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col"
+      dir="rtl"
+      style={appRotationStyle}
+    >
       <header className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
         <h1 className="text-base font-semibold tracking-tight">مترجم لايف</h1>
         <div className="flex items-center gap-3">
           <span className="text-xs text-neutral-500 hidden sm:inline">إنجليزي / روسي ← عربي</span>
+          <button
+            type="button"
+            onClick={() =>
+              setViewRotation((angle) => (angle + 90) % 360)
+            }
+            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800"
+            aria-label={`تدوير الشاشة؛ الاتجاه الحالي ${viewRotation} درجة`}
+            title="تدوير الشاشة"
+          >
+            <RotateCcw size={16} />
+            <span>{viewRotation}°</span>
+          </button>
           <button
             onClick={() => setWideBox((w) => !w)}
             className={`text-neutral-400 hover:text-amber-400 p-1 rounded-md ${
@@ -1402,42 +1450,60 @@ const runSearch = useCallback(
               wideBox ? "inset-x-2 bottom-2" : "inset-x-3 bottom-3"
             }`}
           >
-            <div
-              className={`backdrop-blur-sm rounded-2xl border border-white/10 pointer-events-auto drop-shadow-lg ${
-                wideBox
-                  ? "bg-black/18 px-3 py-2.5 w-full max-w-none flex flex-row flex-wrap gap-x-4 gap-y-2 items-start"
-                  : "bg-black/18 px-3.5 py-3 max-w-xl mx-auto space-y-1.5"
-              }`}
-            >
-                           {primaryLine.translation && (
-                <div className={wideBox ? "min-w-[30%] flex-1" : undefined}>
-                  <p
-                    dir="rtl"
-                    className="text-right whitespace-pre-line text-base sm:text-lg leading-snug font-semibold text-amber-300 drop-shadow"
-                  >
-                    {primaryLine.translation}
-                  </p>
-                </div>
+            <div className="flex flex-col gap-4 rounded-2xl border border-white/10 bg-black/70 p-4 shadow-lg backdrop-blur-sm pointer-events-auto">
+              {primaryLine.translation && (
+                <p
+                  dir="rtl"
+                  className="whitespace-pre-line text-right text-base font-semibold leading-[1.7] text-amber-300 [overflow-wrap:anywhere] sm:text-lg"
+                >
+                  {primaryLine.translation}
+                </p>
               )}
               {primaryLine.original && (
-                <div className={wideBox ? "min-w-[30%] flex-1" : "border-t border-white/10 pt-1.5"}>
-                  <p className="text-sm text-white/90 leading-relaxed drop-shadow" dir="ltr">
-                    {primaryLine.original}
-                  </p>
-                </div>
+                <p
+                  dir="ltr"
+                  className="whitespace-pre-line text-left text-sm leading-[1.7] text-white/90 [overflow-wrap:anywhere]"
+                >
+                  {primaryLine.original}
+                </p>
               )}
-              <div className={wideBox ? "min-w-[25%] flex-1" : "pt-1 border-t border-white/10"}>
+              <div>
                 {searching ? (
                   <p className="text-xs text-emerald-200/90 flex items-center gap-1">
                     <Loader2 size={11} className="animate-spin" />
                     جاري الإجابة تلقائيًا...
                   </p>
-                 ) : searchInfo ? (
-                  <div className="text-left">
+                ) : searchInfo ? (
+                  <div className="rounded-xl border border-emerald-400/40 bg-emerald-950/60 p-4 shadow-md">
+                    <p className="mb-2 text-xs font-semibold text-emerald-300">
+                      الإجابة
+                    </p>
                     {renderFormattedAnswer(searchInfo)}
                   </div>
                 ) : searchError ? (
-                  <p className="text-xs text-red-200">{searchError}</p>
+                  <div
+                    role="alert"
+                    className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-400/30 bg-red-950/60 p-3 text-sm text-red-100"
+                  >
+                    <p className="min-w-0 flex-1 whitespace-pre-line [overflow-wrap:anywhere]">
+                      {searchError}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        primaryLine &&
+                        runSearch(
+                          primaryLine.original,
+                          primaryLine.translation,
+                          { force: true }
+                        )
+                      }
+                      disabled={searching || !primaryLine}
+                      className="rounded-lg bg-red-500/20 px-3 py-2 font-medium hover:bg-red-500/30 disabled:opacity-50"
+                    >
+                      حاول مرة أخرى
+                    </button>
+                  </div>
                 ) : (
                   <p className="text-[11px] text-white/50">الإجابة هتظهر هنا تلقائي</p>
                 )}
