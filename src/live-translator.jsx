@@ -545,6 +545,7 @@ export default function LiveTranslator() {
   const searchRequestIdRef = useRef(0);
   const captureSeqRef = useRef(0);
   const runningRef = useRef(false);
+  const captureFeedbackTimerRef = useRef(null);
 
   const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -557,6 +558,8 @@ export default function LiveTranslator() {
   const [errorLog, setErrorLog] = useState([]);
   const [showErrors, setShowErrors] = useState(false);
   const [copyOk, setCopyOk] = useState("");
+  const [captureFlash, setCaptureFlash] = useState(false);
+  const [captureStatus, setCaptureStatus] = useState("");
   const [wideBox, setWideBox] = useState(false);
 
   const [showSettings, setShowSettings] = useState(false);
@@ -695,14 +698,34 @@ const startCamera = useCallback(async (preferredFacing = facing) => {
         streamRef.current = null;
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const preferredConstraints = {
         video: {
-          facingMode: {
-            ideal: preferredFacing,
-          },
+          facingMode: { ideal: preferredFacing },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
         },
         audio: false,
-      });
+      };
+
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(
+          preferredConstraints
+        );
+      } catch (error) {
+        if (
+          error?.name !== "OverconstrainedError" &&
+          error?.name !== "ConstraintNotSatisfiedError"
+        ) {
+          throw error;
+        }
+
+        // إعادة المحاولة بالكاميرا المفضلة بس، والجهاز يختار الدقة
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: preferredFacing } },
+          audio: false,
+        });
+      }
 
       streamRef.current = stream;
 
@@ -737,6 +760,11 @@ useEffect(() => {
       if (searchDelayRef.current) {
         clearTimeout(searchDelayRef.current);
         searchDelayRef.current = null;
+      }
+
+      if (captureFeedbackTimerRef.current) {
+        clearTimeout(captureFeedbackTimerRef.current);
+        captureFeedbackTimerRef.current = null;
       }
 
       captureSeqRef.current += 1;
@@ -933,8 +961,26 @@ const runSearch = useCallback(
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      throw new Error("تعذر تجهيز لوحة التقاط الصورة.");
+    }
+
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
+
+    // ومضة غالق سريعة + شارة تأكيد أطول من غير ما تعطّل الالتقاط
+    if (captureFeedbackTimerRef.current) {
+      clearTimeout(captureFeedbackTimerRef.current);
+      captureFeedbackTimerRef.current = null;
+    }
+    setCaptureFlash(true);
+    setCaptureStatus("تم التقاط الصورة");
+    captureFeedbackTimerRef.current = setTimeout(() => {
+      setCaptureFlash(false);
+      setCaptureStatus("");
+      captureFeedbackTimerRef.current = null;
+    }, 1000);
+
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
     const base64 = dataUrl.split(",")[1];
 
     lastRequestAtRef.current = Date.now();
@@ -996,6 +1042,13 @@ const runSearch = useCallback(
       searchRequestIdRef.current += 1;
       searchingRef.current = false;
       setSearching(false);
+
+      if (captureFeedbackTimerRef.current) {
+        clearTimeout(captureFeedbackTimerRef.current);
+        captureFeedbackTimerRef.current = null;
+      }
+      setCaptureFlash(false);
+      setCaptureStatus("");
 
       if (searchDelayRef.current) {
         clearTimeout(searchDelayRef.current);
@@ -1311,6 +1364,21 @@ const runSearch = useCallback(
   className="w-full h-full object-cover"
   style={{ transform: facing === "user" ? "scaleX(-1)" : "none" }}
 />
+        {captureFlash && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 z-20 bg-white/70"
+          />
+        )}
+        {captureStatus && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="absolute top-3 left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1.5 text-xs text-white shadow"
+          >
+            {captureStatus}
+          </div>
+        )}
         <canvas ref={canvasRef} className="hidden" />
 
         {busy && (
