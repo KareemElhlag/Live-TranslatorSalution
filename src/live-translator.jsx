@@ -1360,26 +1360,45 @@ const runSearch = useCallback(
     >
       <header className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
         <h1 className="text-base font-semibold tracking-tight">مترجم لايف</h1>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3">
           <span className="text-xs text-neutral-500 hidden sm:inline">إنجليزي / روسي ← عربي</span>
-          {primaryLine && searchInfo && (
-            <button
-              type="button"
-              onClick={() =>
-                setOverlayMode((mode) =>
-                  mode === "answer" ? "translation" : "answer"
-                )
-              }
-              className="rounded-md border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800"
-              aria-label={
-                overlayMode === "answer" ? "عرض الترجمة" : "عرض الإجابة"
-              }
-              title={
-                overlayMode === "answer" ? "عرض الترجمة" : "عرض الإجابة"
-              }
+          {primaryLine && (searchInfo || searchError || searching) && (
+            <div
+              role="group"
+              aria-label="عرض الترجمة أو الإجابة"
+              className="flex shrink-0 items-center gap-1 rounded-lg border border-neutral-700 bg-neutral-900/80 p-1"
             >
-              {overlayMode === "answer" ? "الترجمة" : "الإجابة"}
-            </button>
+              <button
+                type="button"
+                onClick={() => setOverlayMode("translation")}
+                aria-pressed={overlayMode === "translation"}
+                className={`rounded-md px-2 py-1 text-xs transition-colors ${
+                  overlayMode === "translation"
+                    ? "bg-neutral-700 text-white"
+                    : "text-neutral-400 hover:bg-neutral-800"
+                }`}
+              >
+                الترجمة
+              </button>
+              <button
+                type="button"
+                onClick={() => setOverlayMode("answer")}
+                aria-pressed={overlayMode === "answer"}
+                className={`flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
+                  overlayMode === "answer"
+                    ? "bg-neutral-700 text-white"
+                    : "text-neutral-400 hover:bg-neutral-800"
+                }`}
+              >
+                الإجابة
+                {searchError && (
+                  <span
+                    aria-hidden="true"
+                    className="h-1.5 w-1.5 rounded-full bg-red-400"
+                  />
+                )}
+              </button>
+            </div>
           )}
           <button
             type="button"
@@ -1472,7 +1491,7 @@ const runSearch = useCallback(
               wideBox ? "inset-x-2 bottom-2" : "inset-x-3 bottom-3"
             }`}
           >
-            <div className="flex flex-col gap-4 rounded-2xl border border-white/10 bg-black/70 p-4 shadow-lg backdrop-blur-sm pointer-events-auto">
+            <div className="pointer-events-auto box-border flex max-h-[min(62dvh,32rem)] min-w-0 flex-col gap-5 overflow-y-auto rounded-2xl border border-white/10 bg-black/75 p-4 shadow-lg backdrop-blur-sm sm:p-5">
               {overlayMode === "translation" ? (
                 <div className="space-y-4">
                   {primaryLine.translation && (
@@ -1507,6 +1526,31 @@ const runSearch = useCallback(
                       جاري الإجابة تلقائيًا...
                     </p>
                   )}
+                  {searchError && (
+                    <div
+                      role="alert"
+                      className="flex flex-wrap items-center justify-between gap-3 border-t border-red-400/30 pt-3 text-sm leading-[1.7] text-red-100"
+                    >
+                      <p className="min-w-0 flex-1 whitespace-pre-line [overflow-wrap:anywhere]">
+                        {searchError}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          primaryLine &&
+                          runSearch(
+                            primaryLine.original,
+                            primaryLine.translation,
+                            { force: true }
+                          )
+                        }
+                        disabled={searching || !primaryLine}
+                        className="rounded-lg bg-red-500/20 px-3 py-2 font-medium hover:bg-red-500/30 disabled:opacity-50"
+                      >
+                        حاول مرة أخرى
+                      </button>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="space-y-3">
@@ -1540,7 +1584,7 @@ const runSearch = useCallback(
                       </button>
                     </div>
                   ) : searchInfo ? (
-                    <div className="rounded-xl border border-emerald-400/40 bg-emerald-950/60 p-4 shadow-md">
+                    <div className="min-w-0 rounded-xl border border-emerald-400/40 bg-emerald-950/60 p-4 leading-[1.7] shadow-md [&_*]:[overflow-wrap:anywhere]">
                       <p className="mb-2 text-xs font-semibold text-emerald-300">
                         الإجابة
                       </p>
