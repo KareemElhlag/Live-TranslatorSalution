@@ -562,6 +562,7 @@ export default function LiveTranslator() {
   const [captureStatus, setCaptureStatus] = useState("");
   const [wideBox, setWideBox] = useState(false);
   const [viewRotation, setViewRotation] = useState(0);
+  const [overlayMode, setOverlayMode] = useState("translation");
 
   const [showSettings, setShowSettings] = useState(false);
   const [models, setModels] = useState(() => readSessionModelStore().models);
@@ -934,6 +935,7 @@ const runSearch = useCallback(
 
         if (result.text) {
           setSearchInfo(result.text);
+          setOverlayMode("answer");
         } else {
           setSearchError("لم تصل إجابة. حاول مرة أخرى.");
           pushError("answer", "رد الإجابة فاضي", q);
@@ -1039,6 +1041,7 @@ const runSearch = useCallback(
       if (frameHash) lastImageHashRef.current = frameHash;
 
       setLines(captured);
+      setOverlayMode("translation");
       searchRequestIdRef.current += 1;
       searchingRef.current = false;
       setSearching(false);
@@ -1359,6 +1362,25 @@ const runSearch = useCallback(
         <h1 className="text-base font-semibold tracking-tight">مترجم لايف</h1>
         <div className="flex items-center gap-3">
           <span className="text-xs text-neutral-500 hidden sm:inline">إنجليزي / روسي ← عربي</span>
+          {primaryLine && searchInfo && (
+            <button
+              type="button"
+              onClick={() =>
+                setOverlayMode((mode) =>
+                  mode === "answer" ? "translation" : "answer"
+                )
+              }
+              className="rounded-md border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800"
+              aria-label={
+                overlayMode === "answer" ? "عرض الترجمة" : "عرض الإجابة"
+              }
+              title={
+                overlayMode === "answer" ? "عرض الترجمة" : "عرض الإجابة"
+              }
+            >
+              {overlayMode === "answer" ? "الترجمة" : "الإجابة"}
+            </button>
+          )}
           <button
             type="button"
             onClick={() =>
@@ -1451,63 +1473,86 @@ const runSearch = useCallback(
             }`}
           >
             <div className="flex flex-col gap-4 rounded-2xl border border-white/10 bg-black/70 p-4 shadow-lg backdrop-blur-sm pointer-events-auto">
-              {primaryLine.translation && (
-                <p
-                  dir="rtl"
-                  className="whitespace-pre-line text-right text-base font-semibold leading-[1.7] text-amber-300 [overflow-wrap:anywhere] sm:text-lg"
-                >
-                  {primaryLine.translation}
-                </p>
-              )}
-              {primaryLine.original && (
-                <p
-                  dir="ltr"
-                  className="whitespace-pre-line text-left text-sm leading-[1.7] text-white/90 [overflow-wrap:anywhere]"
-                >
-                  {primaryLine.original}
-                </p>
-              )}
-              <div>
-                {searching ? (
-                  <p className="text-xs text-emerald-200/90 flex items-center gap-1">
-                    <Loader2 size={11} className="animate-spin" />
-                    جاري الإجابة تلقائيًا...
-                  </p>
-                ) : searchInfo ? (
-                  <div className="rounded-xl border border-emerald-400/40 bg-emerald-950/60 p-4 shadow-md">
-                    <p className="mb-2 text-xs font-semibold text-emerald-300">
-                      الإجابة
+              {overlayMode === "translation" ? (
+                <div className="space-y-4">
+                  {primaryLine.translation && (
+                    <section>
+                      <p className="mb-1 text-xs font-semibold text-amber-200/80">
+                        الترجمة
+                      </p>
+                      <p
+                        dir="rtl"
+                        className="whitespace-pre-line text-right text-base font-semibold leading-[1.7] text-amber-300 [overflow-wrap:anywhere] sm:text-lg"
+                      >
+                        {primaryLine.translation}
+                      </p>
+                    </section>
+                  )}
+                  {primaryLine.original && (
+                    <section>
+                      <p className="mb-1 text-xs font-semibold text-white/50">
+                        الأصل
+                      </p>
+                      <p
+                        dir="ltr"
+                        className="whitespace-pre-line text-left text-sm leading-[1.7] text-white/90 [overflow-wrap:anywhere]"
+                      >
+                        {primaryLine.original}
+                      </p>
+                    </section>
+                  )}
+                  {searching && (
+                    <p className="text-xs text-emerald-200/90 flex items-center gap-1">
+                      <Loader2 size={11} className="animate-spin" />
+                      جاري الإجابة تلقائيًا...
                     </p>
-                    {renderFormattedAnswer(searchInfo)}
-                  </div>
-                ) : searchError ? (
-                  <div
-                    role="alert"
-                    className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-400/30 bg-red-950/60 p-3 text-sm text-red-100"
-                  >
-                    <p className="min-w-0 flex-1 whitespace-pre-line [overflow-wrap:anywhere]">
-                      {searchError}
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {searching ? (
+                    <p className="text-xs text-emerald-200/90 flex items-center gap-1">
+                      <Loader2 size={11} className="animate-spin" />
+                      جاري الإجابة تلقائيًا...
                     </p>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        primaryLine &&
-                        runSearch(
-                          primaryLine.original,
-                          primaryLine.translation,
-                          { force: true }
-                        )
-                      }
-                      disabled={searching || !primaryLine}
-                      className="rounded-lg bg-red-500/20 px-3 py-2 font-medium hover:bg-red-500/30 disabled:opacity-50"
+                  ) : searchError ? (
+                    <div
+                      role="alert"
+                      className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-400/30 bg-red-950/60 p-3 text-sm text-red-100"
                     >
-                      حاول مرة أخرى
-                    </button>
-                  </div>
-                ) : (
-                  <p className="text-[11px] text-white/50">الإجابة هتظهر هنا تلقائي</p>
-                )}
-              </div>
+                      <p className="min-w-0 flex-1 whitespace-pre-line [overflow-wrap:anywhere]">
+                        {searchError}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          primaryLine &&
+                          runSearch(
+                            primaryLine.original,
+                            primaryLine.translation,
+                            { force: true }
+                          )
+                        }
+                        disabled={searching || !primaryLine}
+                        className="rounded-lg bg-red-500/20 px-3 py-2 font-medium hover:bg-red-500/30 disabled:opacity-50"
+                      >
+                        حاول مرة أخرى
+                      </button>
+                    </div>
+                  ) : searchInfo ? (
+                    <div className="rounded-xl border border-emerald-400/40 bg-emerald-950/60 p-4 shadow-md">
+                      <p className="mb-2 text-xs font-semibold text-emerald-300">
+                        الإجابة
+                      </p>
+                      {renderFormattedAnswer(searchInfo)}
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-white/50">
+                      الإجابة هتظهر هنا تلقائي
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}
