@@ -2,9 +2,7 @@ import React, { useRef, useState, useEffect, useCallback } from "react";
 import {
   Camera,
   Loader2,
-  Pause,
   RotateCcw,
-  AlertCircle,
   Search,
   Settings,
   X,
@@ -14,8 +12,12 @@ import {
   Check,
   Copy,
   Bug,
-  RectangleHorizontal,
-  RectangleVertical,
+  Play,
+  Square,
+  Maximize2,
+  Minimize2,
+  RefreshCw,
+  AlertTriangle,
 } from "lucide-react";
 
 const PROVIDER_DEFAULTS = {
@@ -303,61 +305,401 @@ Rules:
 - Do not use markdown, headings, bullets, or code fences.`;
 }
 
-function renderFormattedAnswer(answer) {
-  const text = String(answer || "").trim();
-  if (!text) return null;
+const ANSWER_HINT_RE =
+  /no (?:multiple[- ]choice|question|options?|data|readable text)|no clear question|not enough (?:text|information|context|data)|(?:does not|doesn[’']?t|did not|didn[’']?t) (?:contain|show|include|have) enough|insufficient|cannot (?:read|determine|answer|find|see)|can[’']?t (?:read|determine|answer|find|see)|unable to (?:read|determine|answer|find|see)|could not (?:read|determine|find|see)|لا يوجد سؤال|مفيش سؤال|لا يمكن قراءة/i;
 
-  const choiceMatch = text.match(
-    /^Correct Answer:\s*(.+?)(?:\r?\n|$)([\s\S]*)$/i
+/** رد الموديل اللي معناه "مفيش سؤال واضح" — ده مش إجابة */
+function looksLikeAnswerHint(text) {
+  const value = String(text || "").trim();
+  if (!value) return false;
+  // الردود الطويلة عادةً إجابة حقيقية؛ الفحص للحالات القصيرة بس
+  if (value.length > 320) return false;
+  return ANSWER_HINT_RE.test(value);
+}
+
+const OPTION_LINE_RE = /^\s*([A-Za-z]|\d{1,2}|[أ-د])\s*[)\].:\-]\s*(\S.*)$/;
+
+/** يفصل نص السؤال عن اختيارات a) b) c) ويرجّع كل اختيار في سطر لوحده */
+function splitChoices(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return { body: "", options: [] };
+
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const options = [];
+  const bodyLines = [];
+
+  for (const line of lines) {
+    const match = line.match(OPTION_LINE_RE);
+    if (match) options.push({ label: match[1], text: match[2].trim() });
+    else bodyLines.push(line);
+  }
+
+  if (options.length >= 2) return { body: bodyLines.join("\n"), options };
+
+  const marker = /(?:^|\s)([A-Za-z]|\d{1,2}|[أ-د])\s*[)\].:\-]\s+(?=\S)/g;
+  const hits = [];
+  let found;
+  while ((found = marker.exec(raw))) {
+    hits.push({
+      label: found[1],
+      start: found.index,
+      textStart: found.index + found[0].length,
+    });
+  }
+
+  if (hits.length >= 2) {
+    const body = raw.slice(0, hits[0].start).trim();
+    const inlineOptions = hits.map((hit, index) => ({
+      label: hit.label,
+      text: raw
+        .slice(hit.textStart, index + 1 < hits.length ? hits[index + 1].start : raw.length)
+        .trim(),
+    }));
+    return { body, options: inlineOptions };
+  }
+
+  return { body: raw, options: [] };
+}
+
+function normalizeOptionText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function findCorrectOptionIndex(options, letter, choiceText) {
+  if (!options.length) return -1;
+
+  const wanted = String(letter || "").trim().toLowerCase();
+  if (wanted) {
+    const byLabel = options.findIndex(
+      (option) => String(option.label || "").trim().toLowerCase() === wanted
+    );
+    if (byLabel >= 0) return byLabel;
+  }
+
+  const target = normalizeOptionText(choiceText);
+  if (!target) return -1;
+
+  const exact = options.findIndex(
+    (option) => normalizeOptionText(option.text) === target
   );
+  if (exact >= 0) return exact;
 
-  if (choiceMatch) {
-    const choice = choiceMatch[1].trim();
-    const explanation = choiceMatch[2]
+  return options.findIndex((option) => {
+    const value = normalizeOptionText(option.text);
+    return Boolean(value) && (value.includes(target) || target.includes(value));
+  });
+}
+
+/** يفكك رد الإجابة لـ: اختيار صح / خطوات / نص */
+function parseAnswer(text) {
+  const value = String(text || "").trim();
+  if (!value) return { kind: "empty" };
+
+  const correct = value.match(/Correct Answer:\s*([^\r\n]+)/i);
+  if (correct) {
+    const head = correct[1].trim();
+    const choiceMatch = head.match(/^([A-Za-z]|\d{1,2}|[أ-د])\s*[)\].:\-]\s*(.+)$/);
+    const explanation = value
+      .slice(value.indexOf(correct[0]) + correct[0].length)
       .replace(/^\s*Reason:\s*/i, "")
       .trim();
 
-    return (
-      <div dir="ltr" className="space-y-2 text-left">
-        <p className="rounded-lg border border-emerald-400/40 bg-emerald-500/15 px-3 py-2 text-base font-bold text-emerald-200">
-          Correct Answer: {choice}
-        </p>
-        {explanation && (
-          <p className="text-sm leading-relaxed text-emerald-100/90">
-            {explanation}
+    return {
+      kind: "mcq",
+      letter: choiceMatch ? choiceMatch[1] : "",
+      choice: choiceMatch ? choiceMatch[2].trim() : head,
+      explanation,
+    };
+  }
+
+  const lines = value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const steps = [];
+  const prose = [];
+  for (const line of lines) {
+    const step = line.match(/^\d{1,2}[.)]\s*(.+)$/);
+    if (step) steps.push(step[1].trim());
+    else prose.push(line);
+  }
+
+  if (steps.length >= 2) {
+    return { kind: "steps", steps, intro: prose.join("\n") };
+  }
+
+  return { kind: "text", text: value.replace(/^\s*Reason:\s*/i, "").trim() };
+}
+
+function CountdownRing({ seconds, total }) {
+  const size = 44;
+  const stroke = 3;
+  const radius = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const ratio = total > 0 ? Math.min(1, Math.max(0, seconds / total)) : 0;
+
+  return (
+    <div
+      role="timer"
+      aria-label={`${seconds} ثانية للالتقاط القادم`}
+      className="relative h-11 w-11 rounded-full bg-black"
+    >
+      <svg
+        width={size}
+        height={size}
+        viewBox={`0 0 ${size} ${size}`}
+        className="-rotate-90"
+        aria-hidden="true"
+      >
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          fill="none"
+          stroke="#3f3f46"
+          strokeWidth={stroke}
+        />
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          fill="none"
+          stroke="#f59e0b"
+          strokeWidth={stroke}
+          strokeLinecap="round"
+          strokeDasharray={circumference}
+          strokeDashoffset={circumference * (1 - ratio)}
+          style={{ transition: "stroke-dashoffset 0.25s linear" }}
+        />
+      </svg>
+      <span className="absolute inset-0 flex items-center justify-center text-[11px] font-bold text-amber-300">
+        {seconds}
+      </span>
+    </div>
+  );
+}
+
+function ChoiceLines({ options, lang = "ar", tone = "gold" }) {
+  if (!options.length) return null;
+
+  return (
+    <ul className="mt-2 space-y-2">
+      {options.map((option, index) => (
+        <li key={`${option.label}-${index}`} className="flex items-start gap-2">
+          <span
+            className={`mt-0.5 flex h-5 min-w-5 shrink-0 items-center justify-center rounded px-1 text-[11px] font-bold ${
+              tone === "gold"
+                ? "bg-amber-600 text-black"
+                : "bg-neutral-800 text-neutral-400"
+            }`}
+          >
+            {option.label}
+          </span>
+          <span
+            dir={lang === "en" ? "ltr" : "rtl"}
+            className={`min-w-0 flex-1 [overflow-wrap:anywhere] ${
+              lang === "en"
+                ? "text-left text-[12px] leading-[1.6] text-neutral-400"
+                : "text-right text-[17px] leading-[1.7] text-amber-300"
+            }`}
+          >
+            {option.text}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function EmptyState({ icon, title, hint }) {
+  return (
+    <div className="flex min-h-[150px] flex-col items-center justify-center gap-2 px-4 text-center">
+      <span className="flex h-10 w-10 items-center justify-center rounded-full border border-neutral-800 bg-neutral-900 text-neutral-500">
+        {icon}
+      </span>
+      <p className="text-sm font-semibold text-neutral-300">{title}</p>
+      <p className="max-w-[32ch] text-xs leading-relaxed text-neutral-500">{hint}</p>
+    </div>
+  );
+}
+
+function TranslationCard({ line }) {
+  const original = splitChoices(line?.original);
+  const translation = splitChoices(line?.translation);
+
+  return (
+    <section className="rounded-2xl border border-neutral-800 bg-neutral-900 p-4">
+      {line?.original ? (
+        <div dir="ltr" className="text-left">
+          <p dir="rtl" className="mb-1 text-[10px] font-semibold text-neutral-500">
+            النص الأصلي
           </p>
+          {original.body && (
+            <p className="whitespace-pre-line text-[12px] leading-[1.6] text-neutral-400 [overflow-wrap:anywhere]">
+              {original.body}
+            </p>
+          )}
+          <ChoiceLines options={original.options} lang="en" tone="muted" />
+        </div>
+      ) : null}
+
+      <div className="my-3 h-px bg-neutral-800" />
+
+      {line?.translation ? (
+        <div dir="rtl">
+          <p className="mb-1 text-[10px] font-semibold text-amber-500">الترجمة</p>
+          {translation.body && (
+            <p className="text-[19px] font-semibold leading-[1.8] text-amber-300 [overflow-wrap:anywhere]">
+              {translation.body}
+            </p>
+          )}
+          <ChoiceLines options={translation.options} lang="ar" tone="gold" />
+        </div>
+      ) : (
+        <p className="text-sm text-neutral-500">مفيش ترجمة للنص ده لسه…</p>
+      )}
+    </section>
+  );
+}
+
+function AnswerCard({ text, line }) {
+  const parsed = parseAnswer(text);
+  const original = splitChoices(line?.original);
+  const translated = splitChoices(line?.translation);
+
+  if (parsed.kind === "mcq") {
+    const correctIndex = findCorrectOptionIndex(
+      original.options,
+      parsed.letter,
+      parsed.choice
+    );
+
+    return (
+      <div className="space-y-3">
+        <section className="rounded-2xl border border-emerald-500/40 bg-emerald-950 p-4">
+          <p className="text-[11px] font-bold text-emerald-300">الإجابة الصحيحة</p>
+          <div className="mt-2 flex items-start gap-2.5">
+            {parsed.letter && (
+              <span className="flex h-9 min-w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-500 px-1.5 text-base font-bold text-emerald-950">
+                {parsed.letter}
+              </span>
+            )}
+            <p
+              dir="ltr"
+              className="min-w-0 flex-1 text-left text-[19px] font-semibold leading-[1.6] text-emerald-50 [overflow-wrap:anywhere]"
+            >
+              {parsed.choice}
+            </p>
+          </div>
+          {parsed.explanation && (
+            <p
+              dir="ltr"
+              className="mt-3 whitespace-pre-line border-t border-emerald-500/25 pt-3 text-left text-sm leading-[1.7] text-emerald-100 [overflow-wrap:anywhere]"
+            >
+              {parsed.explanation}
+            </p>
+          )}
+        </section>
+
+        {original.options.length > 0 && (
+          <ul className="space-y-2">
+            {original.options.map((option, index) => {
+              const isCorrect = index === correctIndex;
+              const arabic = translated.options[index]?.text || "";
+              return (
+                <li
+                  key={`${option.label}-${index}`}
+                  className={`rounded-xl border p-2.5 ${
+                    isCorrect
+                      ? "border-emerald-500 bg-emerald-950"
+                      : "border-neutral-800 bg-neutral-900"
+                  }`}
+                >
+                  <div className="flex items-start gap-2">
+                    <span
+                      className={`mt-0.5 flex h-6 min-w-6 shrink-0 items-center justify-center rounded px-1 text-[11px] font-bold ${
+                        isCorrect
+                          ? "bg-emerald-500 text-emerald-950"
+                          : "bg-neutral-800 text-neutral-400"
+                      }`}
+                    >
+                      {option.label}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p
+                        dir="ltr"
+                        className={`text-left text-sm leading-[1.6] [overflow-wrap:anywhere] ${
+                          isCorrect ? "font-semibold text-emerald-50" : "text-neutral-300"
+                        }`}
+                      >
+                        {option.text}
+                      </p>
+                      {arabic && (
+                        <p
+                          dir="rtl"
+                          className="mt-1 text-right text-[13px] leading-[1.6] text-neutral-400 [overflow-wrap:anywhere]"
+                        >
+                          {arabic}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
         )}
       </div>
     );
   }
 
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  const steps = lines.map((line) => line.match(/^\d+\.\s+(.+)$/));
-
-  if (lines.length > 0 && steps.every(Boolean)) {
+  if (parsed.kind === "steps") {
     return (
-      <ol
-        dir="ltr"
-        className="list-decimal space-y-2 pl-6 text-left text-sm leading-relaxed text-emerald-100/95"
-      >
-        {steps.map((step, index) => (
-          <li key={`${index}-${step[1]}`}>{step[1]}</li>
-        ))}
-      </ol>
+      <section className="rounded-2xl border border-emerald-500/40 bg-emerald-950 p-4">
+        <p className="text-[11px] font-bold text-emerald-300">خطوات الحل</p>
+        {parsed.intro && (
+          <p
+            dir="ltr"
+            className="mt-2 whitespace-pre-line text-left text-sm leading-[1.7] text-emerald-100 [overflow-wrap:anywhere]"
+          >
+            {parsed.intro}
+          </p>
+        )}
+        <ol dir="ltr" className="mt-3 space-y-2.5 text-left">
+          {parsed.steps.map((step, index) => (
+            <li key={`step-${index}`} className="flex items-start gap-2.5">
+              <span className="flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-[12px] font-bold text-emerald-950">
+                {index + 1}
+              </span>
+              <span className="min-w-0 flex-1 text-sm leading-[1.7] text-emerald-50 [overflow-wrap:anywhere]">
+                {step}
+              </span>
+            </li>
+          ))}
+        </ol>
+      </section>
     );
   }
 
   return (
-    <p
-      dir="ltr"
-      className="whitespace-pre-line text-left text-sm leading-relaxed text-emerald-100/95"
-    >
-      {text}
-    </p>
+    <section className="rounded-2xl border border-emerald-500/40 bg-emerald-950 p-4">
+      <p className="text-[11px] font-bold text-emerald-300">الإجابة</p>
+      <p
+        dir="ltr"
+        className="mt-2 whitespace-pre-line text-left text-[15px] leading-[1.8] text-emerald-50 [overflow-wrap:anywhere]"
+      >
+        {parsed.text}
+      </p>
+    </section>
   );
 }
 
@@ -546,6 +888,7 @@ export default function LiveTranslator() {
   const captureSeqRef = useRef(0);
   const runningRef = useRef(false);
   const captureFeedbackTimerRef = useRef(null);
+  const nextCaptureAtRef = useRef(0);
 
   const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -560,7 +903,9 @@ export default function LiveTranslator() {
   const [copyOk, setCopyOk] = useState("");
   const [captureFlash, setCaptureFlash] = useState(false);
   const [captureStatus, setCaptureStatus] = useState("");
-  const [wideBox, setWideBox] = useState(false);
+  const [cameraBig, setCameraBig] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(20);
   const [viewRotation, setViewRotation] = useState(0);
   const [overlayMode, setOverlayMode] = useState("translation");
 
@@ -915,7 +1260,7 @@ const runSearch = useCallback(
       lastSearchKeyRef.current = q;
       setSearching(true);
       setSearchError("");
-      setSearchInfo("");
+      // الإجابة القديمة تفضل ظاهرة لحد ما الإجابة الجديدة تجهز
 
       let timeoutId;
 
@@ -934,8 +1279,8 @@ const runSearch = useCallback(
         if (requestId !== searchRequestIdRef.current) return;
 
         if (result.text) {
+          // التبويب مش بيتغير تلقائيًا — المستخدم هو اللي يفتح تبويب "الإجابة"
           setSearchInfo(result.text);
-          setOverlayMode("answer");
         } else {
           setSearchError("لم تصل إجابة. حاول مرة أخرى.");
           pushError("answer", "رد الإجابة فاضي", q);
@@ -958,6 +1303,8 @@ const runSearch = useCallback(
   );
 
   const captureAndTranslate = useCallback(async () => {
+    // عدّاد دائري (عرض فقط): بيعيد ضبط نفسه مع كل محاولة التقاط
+    nextCaptureAtRef.current = Date.now() + intervalMsRef.current;
     if (!videoRef.current || !canvasRef.current || busyRef.current) return;
     const video = videoRef.current;
     if (video.videoWidth === 0) return;
@@ -1040,12 +1387,11 @@ const runSearch = useCallback(
       lastCaptureKeyRef.current = captureKey;
       if (frameHash) lastImageHashRef.current = frameHash;
 
+      // النتيجة/الإجابة القديمة بتفضل ظاهرة لحد ما الجديدة تجهز
       setLines(captured);
-      setOverlayMode("translation");
       searchRequestIdRef.current += 1;
       searchingRef.current = false;
       setSearching(false);
-      setSearchInfo("");
       setSearchError("");
       lastSearchKeyRef.current = "";
 
@@ -1069,6 +1415,24 @@ const runSearch = useCallback(
   useEffect(() => {
     runningRef.current = running;
   }, [running]);
+
+  // عدّاد الثواني اللي فاضلة للالتقاط القادم — عرض فقط، مش بيتحكم في المؤقت
+  useEffect(() => {
+    if (!running) {
+      setSecondsLeft(Math.round(interval_ / 1000));
+      return;
+    }
+
+    const tick = () => {
+      const remaining = Math.max(0, nextCaptureAtRef.current - Date.now());
+      setSecondsLeft(Math.ceil(remaining / 1000));
+    };
+
+    nextCaptureAtRef.current = Date.now() + interval_;
+    tick();
+    const ticker = window.setInterval(tick, 250);
+    return () => window.clearInterval(ticker);
+  }, [running, interval_]);
 
   useEffect(() => {
     if (!running) {
@@ -1107,6 +1471,11 @@ const runSearch = useCallback(
   }, [running, interval_, captureAndTranslate]);
 
   const toggleRunning = () => setRunning((r) => !r);
+
+  const retryAnswer = () => {
+    if (!primaryLine || searching) return;
+    runSearch(primaryLine.original, primaryLine.translation, { force: true });
+  };
 
  const flipCamera = async () => {
     lastImageHashRef.current = "";
@@ -1352,322 +1721,391 @@ const runSearch = useCallback(
 
   const providerMeta = PROVIDER_DEFAULTS[draft.provider] || PROVIDER_DEFAULTS.openrouter;
 
+  const intervalSeconds = Math.round(interval_ / 1000);
+  const answerHint = looksLikeAnswerHint(searchInfo);
+  const answerReady = Boolean(searchInfo) && !answerHint;
+
   return (
     <div
-      className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col"
+      className="mx-auto flex h-[100dvh] w-full max-w-[560px] flex-col overflow-hidden bg-black text-neutral-100 sm:border-x sm:border-neutral-800"
       dir="rtl"
       style={appRotationStyle}
     >
-      <header className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
-        <h1 className="text-base font-semibold tracking-tight">مترجم لايف</h1>
-        <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3">
-          <span className="text-xs text-neutral-500 hidden sm:inline">إنجليزي / روسي ← عربي</span>
-          {primaryLine && (searchInfo || searchError || searching) && (
-            <div
-              role="group"
-              aria-label="عرض الترجمة أو الإجابة"
-              className="flex shrink-0 items-center gap-1 rounded-lg border border-neutral-700 bg-neutral-900/80 p-1"
-            >
-              <button
-                type="button"
-                onClick={() => setOverlayMode("translation")}
-                aria-pressed={overlayMode === "translation"}
-                className={`rounded-md px-2 py-1 text-xs transition-colors ${
-                  overlayMode === "translation"
-                    ? "bg-neutral-700 text-white"
-                    : "text-neutral-400 hover:bg-neutral-800"
-                }`}
-              >
-                الترجمة
-              </button>
-              <button
-                type="button"
-                onClick={() => setOverlayMode("answer")}
-                aria-pressed={overlayMode === "answer"}
-                className={`flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
-                  overlayMode === "answer"
-                    ? "bg-neutral-700 text-white"
-                    : "text-neutral-400 hover:bg-neutral-800"
-                }`}
-              >
-                الإجابة
-                {searchError && (
-                  <span
-                    aria-hidden="true"
-                    className="h-1.5 w-1.5 rounded-full bg-red-400"
-                  />
-                )}
-              </button>
-            </div>
-          )}
+      {/* 1) الهيدر */}
+      <header className="relative z-30 flex shrink-0 items-center justify-between gap-3 border-b border-neutral-800 bg-black px-3 py-2">
+        <div className="min-w-0">
+          <h1 className="truncate text-sm font-bold leading-tight">مترجم لايف</h1>
+          <p className="mt-0.5 truncate text-[10px] leading-tight text-neutral-500">
+            إنجليزي / روسي ← عربي
+          </p>
+        </div>
+
+        <div className="relative shrink-0">
           <button
             type="button"
-            onClick={() =>
-              setViewRotation((angle) => (angle + 90) % 360)
-            }
-            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800"
-            aria-label={`تدوير الشاشة؛ الاتجاه الحالي ${viewRotation} درجة`}
-            title="تدوير الشاشة"
-          >
-            <RotateCcw size={16} />
-            <span>{viewRotation}°</span>
-          </button>
-          <button
-            onClick={() => setWideBox((w) => !w)}
-            className={`text-neutral-400 hover:text-amber-400 p-1 rounded-md ${
-              wideBox ? "bg-amber-600/20 text-amber-400" : ""
-            }`}
-            aria-label={wideBox ? "وضع الطول" : "وضع العرض"}
-            title={wideBox ? "كارت بالطول" : "كارت بالعرض"}
-          >
-            {wideBox ? <RectangleVertical size={16} /> : <RectangleHorizontal size={16} />}
-          </button>
-          <button
-            onClick={() => setShowErrors(true)}
-            className="relative text-neutral-400 hover:text-amber-400 flex items-center gap-1 text-xs"
-            aria-label="سجل الأخطاء"
-          >
-            <Bug size={16} />
-            {errorLog.length > 0 && (
-              <span className="min-w-5 h-5 px-1 rounded-full bg-red-600 text-white text-[10px] flex items-center justify-center">
-                {errorLog.length}
-              </span>
-            )}
-          </button>
-          <button
-            onClick={openSettings}
-            className="text-neutral-400 hover:text-neutral-200"
-            aria-label="الإعدادات"
+            onClick={() => setMenuOpen((open) => !open)}
+            aria-expanded={menuOpen}
+            aria-haspopup="menu"
+            aria-label="أدوات وإعدادات"
+            title="أدوات وإعدادات"
+            className="flex h-11 w-11 items-center justify-center rounded-xl border border-neutral-800 bg-neutral-900 text-neutral-300 hover:text-white"
           >
             <Settings size={18} />
           </button>
+
+          {menuOpen && (
+            <>
+              <button
+                type="button"
+                aria-label="إغلاق القائمة"
+                onClick={() => setMenuOpen(false)}
+                className="fixed inset-0 z-30 cursor-default bg-black/60"
+              />
+              <div
+                role="menu"
+                className="absolute left-0 top-12 z-40 w-56 overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900 py-1 shadow-2xl"
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    startCamera(facing);
+                  }}
+                  className="flex min-h-[44px] w-full items-center gap-2 px-3 text-sm text-neutral-200 hover:bg-neutral-800"
+                >
+                  <Camera size={15} className="text-sky-400" />
+                  تشغيل الكاميرا
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    flipCamera();
+                  }}
+                  className="flex min-h-[44px] w-full items-center gap-2 px-3 text-sm text-neutral-200 hover:bg-neutral-800"
+                >
+                  <RotateCcw size={15} className="text-neutral-400" />
+                  قلب الكاميرا
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    forceRecapture();
+                  }}
+                  disabled={busy}
+                  className="flex min-h-[44px] w-full items-center gap-2 px-3 text-sm text-neutral-200 hover:bg-neutral-800 disabled:opacity-40"
+                >
+                  <RefreshCw size={15} className="text-neutral-400" />
+                  صوّر من جديد
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    retryAnswer();
+                  }}
+                  disabled={!primaryLine || searching}
+                  className="flex min-h-[44px] w-full items-center gap-2 px-3 text-sm text-neutral-200 hover:bg-neutral-800 disabled:opacity-40"
+                >
+                  <Search size={15} className="text-neutral-400" />
+                  حدّث الإجابة
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setViewRotation((angle) => (angle + 90) % 360);
+                  }}
+                  className="flex min-h-[44px] w-full items-center gap-2 px-3 text-sm text-neutral-200 hover:bg-neutral-800"
+                >
+                  <RotateCcw size={15} className="text-neutral-400" />
+                  تدوير الشاشة
+                  <span className="text-[11px] text-neutral-500" dir="ltr">
+                    {viewRotation}°
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setShowErrors(true);
+                  }}
+                  className="flex min-h-[44px] w-full items-center gap-2 px-3 text-sm text-neutral-200 hover:bg-neutral-800"
+                >
+                  <Bug size={15} className="text-neutral-400" />
+                  سجل الأخطاء
+                  {errorLog.length > 0 && (
+                    <span className="min-w-5 rounded-full bg-red-600 px-1 text-center text-[10px] font-bold text-white">
+                      {errorLog.length}
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    openSettings();
+                  }}
+                  className="flex min-h-[44px] w-full items-center gap-2 border-t border-neutral-800 px-3 text-sm text-neutral-200 hover:bg-neutral-800"
+                >
+                  <Settings size={15} className="text-neutral-400" />
+                  الإعدادات
+                </button>
+                <p
+                  className="truncate border-t border-neutral-800 px-3 py-2 text-[10px] text-neutral-500"
+                  title={activeModel?.name || ""}
+                >
+                  الموديل: {activeModel ? activeModel.name : "جارٍ التحميل..."}
+                </p>
+              </div>
+            </>
+          )}
         </div>
       </header>
 
-      <div className="relative flex-1 bg-black overflow-hidden">
-       <video
-  ref={videoRef}
-  playsInline
-  muted
-  autoPlay
-  className="w-full h-full object-cover"
-  style={{ transform: facing === "user" ? "scaleX(-1)" : "none" }}
-/>
+      {/* 2) الكاميرا */}
+      <div
+        className="relative min-h-[110px] shrink overflow-hidden bg-black"
+        style={{
+          flexBasis: cameraBig ? "62%" : "34%",
+          flexGrow: 0,
+          flexShrink: 1,
+        }}
+      >
+        <video
+          ref={videoRef}
+          playsInline
+          muted
+          autoPlay
+          className="h-full w-full object-cover"
+          style={{ transform: facing === "user" ? "scaleX(-1)" : "none" }}
+        />
+        <canvas ref={canvasRef} className="hidden" />
+
         {captureFlash && (
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-0 z-20 bg-white/70"
+            className="pointer-events-none absolute inset-0 z-20 bg-white/30"
           />
         )}
-        {captureStatus && (
-          <div
-            role="status"
-            aria-live="polite"
-            className="absolute top-3 left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1.5 text-xs text-white shadow"
-          >
-            {captureStatus}
-          </div>
-        )}
-        <canvas ref={canvasRef} className="hidden" />
 
-        {busy && (
-          <div className="absolute top-3 left-3 bg-black/40 backdrop-blur-sm px-3 py-1.5 rounded-full flex items-center gap-2 text-xs z-10">
-            <Loader2 size={14} className="animate-spin" />
-            Agent بيترجم...
-          </div>
-        )}
+        <div className="pointer-events-none absolute inset-x-4 top-[18%] bottom-[18%] z-10 flex flex-col">
+          <div className="min-h-0 flex-1 rounded-xl border-2 border-dashed border-amber-500" />
+          <span className="mt-1.5 self-center rounded-md bg-black px-2 py-0.5 text-[11px] font-medium text-amber-400">
+            وجّه السطر هنا
+          </span>
+        </div>
 
-        <button
-          onClick={flipCamera}
-          className="absolute top-3 right-3 bg-black/40 backdrop-blur-sm p-2 rounded-full z-10"
-          aria-label="قلب الكاميرا"
-        >
-          <RotateCcw size={16} />
-        </button>
+        <div className="absolute right-2 top-2 z-20">
+          {busy ? (
+            <span className="flex items-center gap-1.5 rounded-full bg-black px-2.5 py-1.5 text-[11px] font-medium text-amber-300">
+              <Loader2 size={12} className="animate-spin" />
+              جاري الالتقاط والترجمة…
+            </span>
+          ) : running ? (
+            <span className="flex items-center gap-1.5 rounded-full bg-black px-2.5 py-1.5 text-[11px] font-medium text-white">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
+              مباشر
+            </span>
+          ) : (
+            <span className="flex items-center gap-1.5 rounded-full bg-black px-2.5 py-1.5 text-[11px] font-medium text-neutral-400">
+              <span className="h-2 w-2 rounded-full bg-neutral-600" />
+              متوقف
+            </span>
+          )}
+        </div>
 
-        {primaryLine && (
-          <div
-            className={`absolute z-10 pointer-events-none ${
-              wideBox ? "inset-x-2 bottom-2" : "inset-x-3 bottom-3"
-            }`}
-          >
-            <div className="pointer-events-auto box-border flex max-h-[min(62dvh,32rem)] min-w-0 flex-col gap-5 overflow-y-auto rounded-2xl border border-white/10 bg-black/75 p-4 shadow-lg backdrop-blur-sm sm:p-5">
-              {overlayMode === "translation" ? (
-                <div className="space-y-4">
-                  {primaryLine.translation && (
-                    <section>
-                      <p className="mb-1 text-xs font-semibold text-amber-200/80">
-                        الترجمة
-                      </p>
-                      <p
-                        dir="rtl"
-                        className="whitespace-pre-line text-right text-base font-semibold leading-[1.7] text-amber-300 [overflow-wrap:anywhere] sm:text-lg"
-                      >
-                        {primaryLine.translation}
-                      </p>
-                    </section>
-                  )}
-                  {primaryLine.original && (
-                    <section>
-                      <p className="mb-1 text-xs font-semibold text-white/50">
-                        الأصل
-                      </p>
-                      <p
-                        dir="ltr"
-                        className="whitespace-pre-line text-left text-sm leading-[1.7] text-white/90 [overflow-wrap:anywhere]"
-                      >
-                        {primaryLine.original}
-                      </p>
-                    </section>
-                  )}
-                  {searching && (
-                    <p className="text-xs text-emerald-200/90 flex items-center gap-1">
-                      <Loader2 size={11} className="animate-spin" />
-                      جاري الإجابة تلقائيًا...
-                    </p>
-                  )}
-                  {searchError && (
-                    <div
-                      role="alert"
-                      className="flex flex-wrap items-center justify-between gap-3 border-t border-red-400/30 pt-3 text-sm leading-[1.7] text-red-100"
-                    >
-                      <p className="min-w-0 flex-1 whitespace-pre-line [overflow-wrap:anywhere]">
-                        {searchError}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          primaryLine &&
-                          runSearch(
-                            primaryLine.original,
-                            primaryLine.translation,
-                            { force: true }
-                          )
-                        }
-                        disabled={searching || !primaryLine}
-                        className="rounded-lg bg-red-500/20 px-3 py-2 font-medium hover:bg-red-500/30 disabled:opacity-50"
-                      >
-                        حاول مرة أخرى
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {searching ? (
-                    <p className="text-xs text-emerald-200/90 flex items-center gap-1">
-                      <Loader2 size={11} className="animate-spin" />
-                      جاري الإجابة تلقائيًا...
-                    </p>
-                  ) : searchError ? (
-                    <div
-                      role="alert"
-                      className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-400/30 bg-red-950/60 p-3 text-sm text-red-100"
-                    >
-                      <p className="min-w-0 flex-1 whitespace-pre-line [overflow-wrap:anywhere]">
-                        {searchError}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          primaryLine &&
-                          runSearch(
-                            primaryLine.original,
-                            primaryLine.translation,
-                            { force: true }
-                          )
-                        }
-                        disabled={searching || !primaryLine}
-                        className="rounded-lg bg-red-500/20 px-3 py-2 font-medium hover:bg-red-500/30 disabled:opacity-50"
-                      >
-                        حاول مرة أخرى
-                      </button>
-                    </div>
-                  ) : searchInfo ? (
-                    <div className="min-w-0 rounded-xl border border-emerald-400/40 bg-emerald-950/60 p-4 leading-[1.7] shadow-md [&_*]:[overflow-wrap:anywhere]">
-                      <p className="mb-2 text-xs font-semibold text-emerald-300">
-                        الإجابة
-                      </p>
-                      {renderFormattedAnswer(searchInfo)}
-                    </div>
-                  ) : (
-                    <p className="text-[11px] text-white/50">
-                      الإجابة هتظهر هنا تلقائي
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
+        <div className="absolute left-2 top-2 z-20">
+          <CountdownRing
+            seconds={running ? secondsLeft : intervalSeconds}
+            total={intervalSeconds}
+          />
+        </div>
+
+        <div className="absolute inset-x-0 bottom-0 z-20 h-[3px] overflow-hidden bg-amber-500/20">
+          {(busy || searching) && (
+            <div className="bu-progress-bar h-full w-1/3 rounded-full bg-amber-500" />
+          )}
+        </div>
       </div>
 
-      <div className="bg-neutral-900 border-t border-neutral-800 px-4 py-4 space-y-3">
-        {!primaryLine && (
-          <p className="text-sm text-neutral-500 text-center py-1">
-            وجّه الكاميرا على سطر واحد — الترجمة فوق / الأصل / الإجابة تحت · الالتقاط كل{" "}
-            {interval_ / 1000}ث
-          </p>
-        )}
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-neutral-800 bg-black px-3">
+        <button
+          type="button"
+          onClick={() => setCameraBig((value) => !value)}
+          aria-pressed={cameraBig}
+          className="flex min-h-[44px] items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-neutral-400 hover:text-amber-400"
+        >
+          {cameraBig ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+          {cameraBig ? "⤡ تكبير النتيجة" : "⤢ تكبير الكاميرا"}
+        </button>
+        <p className="truncate text-[10px] text-neutral-600">
+          كل {intervalSeconds} ثانية
+        </p>
+      </div>
 
-        {primaryLine && (
-          <div className="flex items-center gap-3 flex-wrap">
+      {/* 3) النتائج */}
+      <div className="flex min-h-[120px] flex-1 flex-col bg-neutral-950">
+        <div className="shrink-0 px-3 pt-2">
+          <div
+            role="tablist"
+            aria-label="الترجمة والإجابة"
+            className="flex gap-1 rounded-xl border border-neutral-800 bg-neutral-900 p-1"
+          >
             <button
-              onClick={() => runSearch(primaryLine.original, primaryLine.translation, { force: true })}
-              disabled={searching}
-              className="flex items-center gap-2 text-xs text-amber-500 hover:text-amber-400 disabled:opacity-50"
+              type="button"
+              role="tab"
+              aria-selected={overlayMode === "translation"}
+              onClick={() => setOverlayMode("translation")}
+              className={`flex min-h-[44px] flex-1 items-center justify-center rounded-lg text-sm font-semibold transition-colors ${
+                overlayMode === "translation"
+                  ? "bg-amber-600 text-white"
+                  : "text-neutral-400 hover:text-neutral-200"
+              }`}
             >
-              {searching ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
-              حدّث الإجابة
+              الترجمة
             </button>
             <button
-              onClick={forceRecapture}
-              disabled={busy}
-              className="flex items-center gap-2 text-xs text-neutral-400 hover:text-neutral-200 disabled:opacity-50"
+              type="button"
+              role="tab"
+              aria-selected={overlayMode === "answer"}
+              onClick={() => setOverlayMode("answer")}
+              className={`flex min-h-[44px] flex-1 items-center justify-center gap-1.5 rounded-lg text-sm font-semibold transition-colors ${
+                overlayMode === "answer"
+                  ? "bg-emerald-600 text-white"
+                  : "text-neutral-400 hover:text-neutral-200"
+              }`}
             >
-              <Camera size={13} />
-              صوّر من جديد
+              الإجابة
+              {answerReady && (
+                <span className="rounded-full bg-emerald-500 px-1.5 py-0.5 text-[10px] font-bold text-emerald-950">
+                  جاهزة
+                </span>
+              )}
             </button>
           </div>
-        )}
+        </div>
 
-       <div className="flex items-center gap-3 pt-1">
- <button
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-2 pb-4">
+          {overlayMode === "translation" ? (
+            primaryLine ? (
+              <TranslationCard line={primaryLine} />
+            ) : (
+              <EmptyState
+                icon={<Camera size={18} />}
+                title="لسه مفيش ترجمة"
+                hint="وجّه الكاميرا على سطر أو سؤال، وبعدين دوس «ابدأ الترجمة اللايف»."
+              />
+            )
+          ) : answerReady ? (
+            <AnswerCard text={searchInfo} line={primaryLine} />
+          ) : answerHint || searchError ? (
+            <section
+              role={searchError ? "alert" : "status"}
+              className={`rounded-2xl border p-4 ${
+                searchError
+                  ? "border-red-500/40 bg-neutral-900"
+                  : "border-amber-600/40 bg-neutral-900"
+              }`}
+            >
+              {searchError ? (
+                <p className="whitespace-pre-line text-sm leading-[1.7] text-red-200 [overflow-wrap:anywhere]">
+                  {searchError}
+                </p>
+              ) : (
+                <div className="flex items-start gap-2">
+                  <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-400" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold leading-[1.7] text-neutral-100">
+                      مفيش سؤال واضح في الصورة، قرّب الكاميرا من السؤال
+                    </p>
+                    <p className="mt-1 text-[11px] leading-relaxed text-neutral-500">
+                      ثبّت الكاميرا على السؤال لحد ما السطر يبان كامل.
+                    </p>
+                  </div>
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={retryAnswer}
+                disabled={!primaryLine || searching}
+                className="mt-3 flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl border border-neutral-700 bg-neutral-800 text-sm font-medium text-neutral-200 hover:bg-neutral-700 disabled:opacity-40"
+              >
+                <RefreshCw size={14} />
+                {searchError ? "حاول مرة أخرى" : "جرّب تاني"}
+              </button>
+            </section>
+          ) : (
+            <EmptyState
+              icon={<Check size={18} />}
+              title="لسه مفيش إجابة"
+              hint="الإجابة هتظهر هنا لما يتعرف على سؤال"
+            />
+          )}
+        </div>
+      </div>
+
+      {/* 4) شريط التحكم */}
+      <div className="shrink-0 border-t border-neutral-800 bg-black px-3 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+        <div className="flex items-center gap-2">
+          <button
             type="button"
-            onClick={() => startCamera("environment")}
-            className="flex-1 flex items-center justify-center gap-2 bg-sky-600 hover:bg-sky-500 transition-colors text-white font-medium py-3 rounded-xl"
+            onClick={() => startCamera(facing)}
+            aria-label="تشغيل الكاميرا"
+            title="تشغيل الكاميرا"
+            className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-sky-600 text-white transition-colors hover:bg-sky-500"
           >
-            <Camera size={18} />
-            تشغيل الكاميرا
+            <Camera size={20} />
           </button>
 
-  <button
-    type="button"
-    onClick={toggleRunning}
-    className="flex-1 flex items-center justify-center gap-2 bg-amber-600 hover:bg-amber-500 transition-colors text-white font-medium py-3 rounded-xl"
-  >
-    {running ? <Pause size={18} /> : <Camera size={18} />}
-    {running ? "إيقاف" : "ابدأ الترجمة اللايف"}
-  </button>
-</div>
+          <button
+            type="button"
+            onClick={toggleRunning}
+            className={`flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-xl text-base font-bold text-white transition-colors ${
+              running ? "bg-red-600 hover:bg-red-500" : "bg-amber-600 hover:bg-amber-500"
+            }`}
+          >
+            {running ? (
+              <Square size={16} className="fill-current" />
+            ) : (
+              <Play size={16} className="fill-current" />
+            )}
+            {running ? "إيقاف" : "ابدأ الترجمة اللايف"}
+          </button>
+        </div>
 
-        <div className="flex items-center justify-center gap-2 text-xs text-neutral-500 flex-wrap">
-          <span>سرعة الالتقاط:</span>
+        <div
+          role="group"
+          aria-label="مدة الالتقاط"
+          className="mt-2 grid grid-cols-4 gap-1.5"
+        >
           {[10000, 20000, 40000, 80000].map((ms) => (
             <button
               key={ms}
+              type="button"
               onClick={() => setInterval_(ms)}
-              className={`px-2 py-1 rounded-md ${
-                interval_ === ms ? "bg-amber-600 text-white" : "bg-neutral-800"
+              aria-pressed={interval_ === ms}
+              className={`min-h-[44px] rounded-lg text-sm font-semibold transition-colors ${
+                interval_ === ms
+                  ? "bg-amber-600 text-white"
+                  : "border border-neutral-800 bg-neutral-900 text-neutral-400 hover:text-neutral-200"
               }`}
             >
               {ms / 1000}ث
             </button>
           ))}
         </div>
-        <p className="text-[11px] text-neutral-600 text-center">
-          نفس الصورة/نفس النص 100% = مفيش طلب جديد · قفل = الالتقاط + 1ث ·{" "}
-          {activeModel ? activeModel.name : "جارٍ التحميل..."}
+
+        <p className="mt-1.5 text-center text-[10px] leading-relaxed text-neutral-600">
+          النتيجة السابقة تفضل ظاهرة لحد ما الجديدة تجهز
         </p>
       </div>
 

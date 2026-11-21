@@ -1,1 +1,21 @@
 @import "tailwindcss";
+
+/* شريط تقدم الترجمة أسفل الكاميرا */
+@keyframes bu-progress {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+.bu-progress-bar {
+  animation: bu-progress 1.15s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bu-progress-bar {
+    animation-duration: 3s;
+  }
+}
