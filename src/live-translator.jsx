@@ -703,6 +703,104 @@ function AnswerCard({ text, line }) {
   );
 }
 
+const REGION_HANDLES = [
+  { key: "nw", position: "left-0 top-0 -translate-x-1/2 -translate-y-1/2", cursor: "cursor-nwse-resize" },
+  { key: "n", position: "left-1/2 top-0 -translate-x-1/2 -translate-y-1/2", cursor: "cursor-ns-resize" },
+  { key: "ne", position: "right-0 top-0 translate-x-1/2 -translate-y-1/2", cursor: "cursor-nesw-resize" },
+  { key: "w", position: "left-0 top-1/2 -translate-x-1/2 -translate-y-1/2", cursor: "cursor-ew-resize" },
+  { key: "e", position: "right-0 top-1/2 translate-x-1/2 -translate-y-1/2", cursor: "cursor-ew-resize" },
+  { key: "sw", position: "bottom-0 left-0 -translate-x-1/2 translate-y-1/2", cursor: "cursor-nesw-resize" },
+  { key: "s", position: "bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2", cursor: "cursor-ns-resize" },
+  { key: "se", position: "bottom-0 right-0 translate-x-1/2 translate-y-1/2", cursor: "cursor-nwse-resize" },
+];
+
+/** إطار الالتقاط: ممشي (سحب) + ٨ مقابض للحجم بإحداثيات المؤشر */
+function CaptureRegion({ region, onChange }) {
+  const containerRef = useRef(null);
+  const dragRef = useRef(null);
+  const cleanupRef = useRef(null);
+
+  const endDrag = useCallback(() => {
+    if (cleanupRef.current) {
+      cleanupRef.current();
+      cleanupRef.current = null;
+    }
+    dragRef.current = null;
+  }, []);
+
+  useEffect(() => endDrag, [endDrag]);
+
+  const startDrag = (event, mode) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+
+    const box = containerRef.current?.getBoundingClientRect();
+    if (!box || !box.width || !box.height) return;
+
+    event.preventDefault();
+    endDrag();
+    dragRef.current = {
+      mode,
+      base: { ...region },
+      startX: event.clientX,
+      startY: event.clientY,
+      width: box.width,
+      height: box.height,
+    };
+
+    const handleMove = (moveEvent) => {
+      const drag = dragRef.current;
+      if (!drag) return;
+      const dx = (moveEvent.clientX - drag.startX) / drag.width;
+      const dy = (moveEvent.clientY - drag.startY) / drag.height;
+      onChange(moveOrResizeRegion(drag.base, drag.mode, dx, dy));
+    };
+
+    const handleEnd = () => endDrag();
+
+    window.addEventListener("pointermove", handleMove, { passive: false });
+    window.addEventListener("pointerup", handleEnd);
+    window.addEventListener("pointercancel", handleEnd);
+    cleanupRef.current = () => {
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleEnd);
+      window.removeEventListener("pointercancel", handleEnd);
+    };
+  };
+
+  return (
+    <div ref={containerRef} className="absolute inset-0 z-10">
+      <div
+        role="group"
+        aria-label="منطقة الالتقاط: اسحب لتحريكها أو اسحب الحواف لتغيير حجمها"
+        onPointerDown={(event) => startDrag(event, "move")}
+        className="absolute cursor-move rounded-xl border-2 border-dashed border-amber-500"
+        style={{
+          left: `${region.x * 100}%`,
+          top: `${region.y * 100}%`,
+          width: `${region.w * 100}%`,
+          height: `${region.h * 100}%`,
+          touchAction: "none",
+          boxShadow: "0 0 0 9999px rgba(0, 0, 0, 0.55)",
+        }}
+      >
+        {REGION_HANDLES.map((handle) => (
+          <span
+            key={handle.key}
+            onPointerDown={(event) => {
+              event.stopPropagation();
+              startDrag(event, handle.key);
+            }}
+            className={`absolute flex h-11 w-11 items-center justify-center ${handle.position} ${handle.cursor}`}
+            style={{ touchAction: "none" }}
+          >
+            <span className="pointer-events-none block h-2.5 w-2.5 rounded-full border border-black bg-amber-400" />
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function normalizeCapture(parsed) {
   if (!parsed?.found) return [];
   if (Array.isArray(parsed.items) && parsed.items.length) {
@@ -846,8 +944,177 @@ function formatErrorTime(ts) {
   }
 }
 
+const REGION_STORAGE_KEY = "live-translator-capture-region";
+
+/** أصغر مساحة مسموحة للمنطقة (كنسبة من الكاميرا) — عشان متنهارش */
+const REGION_MIN = { w: 0.12, h: 0.08 };
+
+/** الافتراضي: نفس الإطار المتقطع القديم — شريط أفقي بعرض الكاميرا تقريبًا */
+const DEFAULT_REGION = { x: 0.045, y: 0.2, w: 0.91, h: 0.6 };
+
+const REGION_PRESETS = [
+  { id: "line", label: "سطر", region: { x: 0.05, y: 0.42, w: 0.9, h: 0.16 } },
+  { id: "question", label: "سؤال", region: { x: 0.06, y: 0.18, w: 0.88, h: 0.64 } },
+  { id: "full", label: "كامل", region: { x: 0, y: 0, w: 1, h: 1 } },
+];
+
+function roundRegion(region) {
+  const tight = (value) => Math.round(value * 10000) / 10000;
+  return {
+    x: tight(region.x),
+    y: tight(region.y),
+    w: tight(region.w),
+    h: tight(region.h),
+  };
+}
+
+function sanitizeRegion(value) {
+  if (!value || typeof value !== "object") return { ...DEFAULT_REGION };
+  const [x, y, w, h] = ["x", "y", "w", "h"].map((key) => Number(value[key]));
+  if (![x, y, w, h].every((number) => Number.isFinite(number))) {
+    return { ...DEFAULT_REGION };
+  }
+
+  const width = Math.min(Math.max(w, REGION_MIN.w), 1);
+  const height = Math.min(Math.max(h, REGION_MIN.h), 1);
+
+  return roundRegion({
+    x: Math.min(Math.max(x, 0), 1 - width),
+    y: Math.min(Math.max(y, 0), 1 - height),
+    w: width,
+    h: height,
+  });
+}
+
+function readStoredRegion() {
+  try {
+    const raw = window.localStorage.getItem(REGION_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_REGION };
+    return sanitizeRegion(JSON.parse(raw));
+  } catch {
+    return { ...DEFAULT_REGION };
+  }
+}
+
+function writeStoredRegion(region) {
+  try {
+    window.localStorage.setItem(REGION_STORAGE_KEY, JSON.stringify(region));
+  } catch {
+    // المتصفح ممكن يمنع التخزين — المنطقة بتفضل شغالة للجلسة الحالية
+  }
+}
+
+function regionsMatch(a, b) {
+  return (
+    Math.abs(a.x - b.x) < 0.002 &&
+    Math.abs(a.y - b.y) < 0.002 &&
+    Math.abs(a.w - b.w) < 0.002 &&
+    Math.abs(a.h - b.h) < 0.002
+  );
+}
+
+function moveOrResizeRegion(base, mode, dx, dy) {
+  let x = base.x;
+  let y = base.y;
+  let w = base.w;
+  let h = base.h;
+
+  if (mode === "move") {
+    x += dx;
+    y += dy;
+  } else {
+    if (mode.includes("w")) {
+      x += dx;
+      w -= dx;
+    }
+    if (mode.includes("e")) w += dx;
+    if (mode.includes("n")) {
+      y += dy;
+      h -= dy;
+    }
+    if (mode.includes("s")) h += dy;
+
+    if (w < REGION_MIN.w) {
+      if (mode.includes("w")) x = base.x + base.w - REGION_MIN.w;
+      w = REGION_MIN.w;
+    }
+    if (h < REGION_MIN.h) {
+      if (mode.includes("n")) y = base.y + base.h - REGION_MIN.h;
+      h = REGION_MIN.h;
+    }
+  }
+
+  w = Math.min(Math.max(w, REGION_MIN.w), 1);
+  h = Math.min(Math.max(h, REGION_MIN.h), 1);
+  x = Math.min(Math.max(x, 0), 1 - w);
+  y = Math.min(Math.max(y, 0), 1 - h);
+
+  return roundRegion({ x, y, w, h });
+}
+
+/**
+ * من إحداثيات العنصر المعروض (0..1) لإحداثيات الفيديو الأصلية.
+ * بيراعي object-fit: cover (الجزء المقصوص من الأطراف) والانعكاس في الكاميرا الأمامية.
+ */
+function regionToVideoRect(region, video, mirrored = false) {
+  const vw = video?.videoWidth || 0;
+  const vh = video?.videoHeight || 0;
+  const ew = video?.clientWidth || 0;
+  const eh = video?.clientHeight || 0;
+  const full = { sx: 0, sy: 0, sw: vw, sh: vh };
+
+  if (!vw || !vh || !ew || !eh) return full;
+
+  const scale = Math.max(ew / vw, eh / vh);
+  const contentW = vw * scale;
+  const contentH = vh * scale;
+  const offsetX = (ew - contentW) / 2;
+  const offsetY = (eh - contentH) / 2;
+
+  const left = region.x * ew - offsetX;
+  const top = region.y * eh - offsetY;
+  const right = left + region.w * ew;
+  const bottom = top + region.h * eh;
+
+  let startX = left / scale;
+  let endX = right / scale;
+  if (mirrored) {
+    startX = (contentW - right) / scale;
+    endX = (contentW - left) / scale;
+  }
+
+  const sx = Math.max(0, Math.min(vw, Math.min(startX, endX)));
+  const ex = Math.max(0, Math.min(vw, Math.max(startX, endX)));
+  const sy = Math.max(0, Math.min(vh, top / scale));
+  const ey = Math.max(0, Math.min(vh, bottom / scale));
+
+  const rsx = Math.round(sx);
+  const rsy = Math.round(sy);
+  const rsw = Math.min(Math.round(ex) - rsx, vw - rsx);
+  const rsh = Math.min(Math.round(ey) - rsy, vh - rsy);
+
+  if (rsw < 1 || rsh < 1) return full;
+  return { sx: rsx, sy: rsy, sw: rsw, sh: rsh };
+}
+
+/** حجم الصورة الخارجة: أطول ضلع ≤ 1600px، وأقصر ضلع أقل من 600px يتكبّر */
+function cropOutputSize(sw, sh) {
+  const longest = Math.max(sw, sh);
+  const shortest = Math.min(sw, sh);
+  let factor = 1;
+
+  if (shortest < 600) factor = 600 / shortest;
+  if (longest * factor > 1600) factor = 1600 / longest;
+  if (!Number.isFinite(factor) || factor <= 0) factor = 1;
+
+  return {
+    w: Math.max(1, Math.round(sw * factor)),
+    h: Math.max(1, Math.round(sh * factor)),
+  };
+}
+
 /** بصمة بكسل دقيقة لإطار مصغّر — تطابق 100% = نفس الصورة حرفيًا */
-function fingerprintVideoFrame(video, canvas) {
+function fingerprintVideoFrame(video, canvas, crop = null) {
   if (!video?.videoWidth || !canvas) return "";
   const w = 160;
   const h = 90;
@@ -855,7 +1122,12 @@ function fingerprintVideoFrame(video, canvas) {
   canvas.height = h;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) return "";
-  ctx.drawImage(video, 0, 0, w, h);
+
+  if (crop) {
+    ctx.drawImage(video, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, w, h);
+  } else {
+    ctx.drawImage(video, 0, 0, w, h);
+  }
   const { data } = ctx.getImageData(0, 0, w, h);
   let hash = 2166136261 >>> 0;
   for (let i = 0; i < data.length; i++) {
@@ -889,6 +1161,7 @@ export default function LiveTranslator() {
   const runningRef = useRef(false);
   const captureFeedbackTimerRef = useRef(null);
   const nextCaptureAtRef = useRef(0);
+  const facingRef = useRef("environment");
 
   const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -908,6 +1181,8 @@ export default function LiveTranslator() {
   const [secondsLeft, setSecondsLeft] = useState(20);
   const [viewRotation, setViewRotation] = useState(0);
   const [overlayMode, setOverlayMode] = useState("translation");
+  const [region, setRegion] = useState(readStoredRegion);
+  const regionRef = useRef(region);
 
   const [showSettings, setShowSettings] = useState(false);
   const [models, setModels] = useState(() => readSessionModelStore().models);
@@ -956,6 +1231,17 @@ export default function LiveTranslator() {
   useEffect(() => {
     intervalMsRef.current = interval_;
   }, [interval_]);
+
+  useEffect(() => {
+    facingRef.current = facing;
+  }, [facing]);
+
+  useEffect(() => {
+    // المنطقة بتتحفظ كنِسَب (0..1) عشان تفضل صالحة بعد أي تدوير/تكبير
+    regionRef.current = region;
+    const timer = window.setTimeout(() => writeStoredRegion(region), 250);
+    return () => window.clearTimeout(timer);
+  }, [region]);
 
   const pushError = useCallback((source, message, detail = "") => {
     const entry = {
@@ -1322,8 +1608,15 @@ const runSearch = useCallback(
       return;
     }
 
+    // منطقة الالتقاط المختارة → إحداثيات الفيديو الأصلية (بمراعاة cover والانعكاس)
+    const crop = regionToVideoRect(
+      regionRef.current,
+      video,
+      facingRef.current === "user"
+    );
+
     // 1) تطابق صورة 100% مع آخر إطار اتعالج → متبعتش Vision خالص
-    const frameHash = fingerprintVideoFrame(video, canvasRef.current);
+    const frameHash = fingerprintVideoFrame(video, canvasRef.current, crop);
     if (frameHash && frameHash === lastImageHashRef.current) {
       return;
     }
@@ -1339,14 +1632,26 @@ const runSearch = useCallback(
     setSearching(false);
 
     const canvas = canvasRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    const output = cropOutputSize(crop.sw, crop.sh);
+    canvas.width = output.w;
+    canvas.height = output.h;
     const ctx = canvas.getContext("2d");
     if (!ctx) {
       throw new Error("تعذر تجهيز لوحة التقاط الصورة.");
     }
 
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    // بنرسم المنطقة المختارة بس
+    ctx.drawImage(
+      video,
+      crop.sx,
+      crop.sy,
+      crop.sw,
+      crop.sh,
+      0,
+      0,
+      output.w,
+      output.h
+    );
 
     // ومضة غالق سريعة + شارة تأكيد أطول من غير ما تعطّل الالتقاط
     if (captureFeedbackTimerRef.current) {
@@ -1897,14 +2202,10 @@ const runSearch = useCallback(
           />
         )}
 
-        <div className="pointer-events-none absolute inset-x-4 top-[18%] bottom-[18%] z-10 flex flex-col">
-          <div className="min-h-0 flex-1 rounded-xl border-2 border-dashed border-amber-500" />
-          <span className="mt-1.5 self-center rounded-md bg-black px-2 py-0.5 text-[11px] font-medium text-amber-400">
-            وجّه السطر هنا
-          </span>
-        </div>
+        <CaptureRegion region={region} onChange={setRegion} />
 
-        <div className="absolute right-2 top-2 z-20">
+        {/* الشارة والعداد للعرض فقط — من غير ما ياخدوا لمس فوق منطقة الالتقاط */}
+        <div className="pointer-events-none absolute right-2 top-2 z-20">
           {busy ? (
             <span className="flex items-center gap-1.5 rounded-full bg-black px-2.5 py-1.5 text-[11px] font-medium text-amber-300">
               <Loader2 size={12} className="animate-spin" />
@@ -1923,7 +2224,7 @@ const runSearch = useCallback(
           )}
         </div>
 
-        <div className="absolute left-2 top-2 z-20">
+        <div className="pointer-events-none absolute left-2 top-2 z-20">
           <CountdownRing
             seconds={running ? secondsLeft : intervalSeconds}
             total={intervalSeconds}
@@ -1937,18 +2238,42 @@ const runSearch = useCallback(
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-neutral-800 bg-black px-3">
-        <button
-          type="button"
-          onClick={() => setCameraBig((value) => !value)}
-          aria-pressed={cameraBig}
-          className="flex min-h-[44px] items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-neutral-400 hover:text-amber-400"
-        >
-          {cameraBig ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-          {cameraBig ? "⤡ تكبير النتيجة" : "⤢ تكبير الكاميرا"}
-        </button>
-        <p className="truncate text-[10px] text-neutral-600">
-          كل {intervalSeconds} ثانية
+      <div className="flex shrink-0 flex-col border-b border-neutral-800 bg-black px-3">
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => setCameraBig((value) => !value)}
+            aria-pressed={cameraBig}
+            className="flex min-h-[44px] items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-neutral-400 hover:text-amber-400"
+          >
+            {cameraBig ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            {cameraBig ? "⤡ تكبير النتيجة" : "⤢ تكبير الكاميرا"}
+          </button>
+
+          <div role="group" aria-label="حجم منطقة الالتقاط" className="flex items-center gap-1">
+            {REGION_PRESETS.map((preset) => {
+              const active = regionsMatch(region, preset.region);
+              return (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => setRegion(sanitizeRegion(preset.region))}
+                  aria-pressed={active}
+                  className={`min-h-[44px] rounded-lg px-2.5 text-[11px] font-semibold transition-colors ${
+                    active
+                      ? "bg-amber-600 text-white"
+                      : "border border-neutral-800 bg-neutral-900 text-neutral-400 hover:text-neutral-200"
+                  }`}
+                >
+                  {preset.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <p className="pb-1 text-center text-[10px] leading-relaxed text-neutral-600">
+          وجّه السطر جوه الإطار · كل {intervalSeconds} ثانية
         </p>
       </div>
 
